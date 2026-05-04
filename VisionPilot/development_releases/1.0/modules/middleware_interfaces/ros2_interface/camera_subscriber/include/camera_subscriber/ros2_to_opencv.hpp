@@ -67,6 +67,34 @@ namespace camera_subscriber {
                 double &timestamp_sec
             );
 
+            /**
+            * @brief Check if any frames are currently in the queue
+            * 
+            * @return true if frames are available, false otherwise
+            */
+            bool has_frames() const;
+
+            /**
+            * @brief Get current queue size (number of buffered frames)
+            * 
+            * @return Current number of frames in the internal queue
+            */
+            size_t get_queue_size() const;
+
+            /**
+            * @brief Get the maximum queue size
+            * 
+            * @return Maximum allowed frames in buffer
+            */
+            size_t get_max_queue_size() const;
+
+            /**
+            * @brief Reset the frame buffer (clear all queued frames)
+            * 
+            * Useful for resetting state or handling error conditions
+            */
+            void clear_frame_buffer();
+
         private:
 
             /**
