@@ -43,6 +43,16 @@ namespace camera_subscriber {
             */
             ~ROS2ImageSubscriber() override = default;
 
+            /**
+            * @brief Get latest frame with corresponding frame metadata
+            *
+            * @return cv::Mat containing the latest image frame received from the ROS2 topic.
+            *
+            * This method is thread-safe and can be called from multiple threads without causing data corruption.
+            * Returns empty cv::Mat if no frames have been received yet.
+            */
+            cv::Mat get_latest_frame();
+
         private:
 
     };
