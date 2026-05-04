@@ -53,6 +53,20 @@ namespace camera_subscriber {
             */
             cv::Mat get_latest_frame();
 
+            /**
+            * @brief Get latest frame with frame metadata, via timestamp and frame index
+            * 
+            * @param frame_index Output parameter: frame sequence number from ROS2 message
+            * @param timestamp_sec Output parameter: ROS2 timestamp in seconds
+            * @return cv::Mat The image frame, or empty if none available
+            * 
+            * Provides additional timing information along with the frame for synchronization purposes.
+            */
+            cv::Mat get_latest_frame_with_timestamp(
+                uint32_t &frame_index,
+                double &timestamp_sec
+            );
+
         private:
 
     };
