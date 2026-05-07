@@ -26,14 +26,14 @@ namespace camera_subscriber {
             * @brief Constructor for ROS2ImageSubscriber
             *
             * @param topic_name The name of the ROS2 topic to subscribe to ("/camera/image_raw", etc.)
-            * @param queue_size Max number of frames to buffer for incoming images (default: 10)
+            * @param queue_size Max number of frames to buffer for incoming images (default: 1)
             * @param node_name The name of the ROS2 node (default: "ros2_image_subscriber")
             *
             * The node automatically inits the ROS2 subscription and begins listening for incoming messages.
             */
             explicit ROS2ImageSubscriber(
                 const std::string& topic_name,
-                size_t queue_size = 10,
+                size_t queue_size = 1,
                 const std::string& node_name = "ros2_image_subscriber"
             );
 
@@ -57,22 +57,22 @@ namespace camera_subscriber {
             * This method is thread-safe and can be called from multiple threads without causing data corruption.
             * Returns empty cv::Mat if no frames have been received yet.
             */
-            cv::Mat get_latest_frame();
+            std::tuple<bool, cv::Mat> get_latest_frame();
 
 
-            /**
-            * @brief Get latest frame with frame metadata, via timestamp and frame index
-            * 
-            * @param frame_index Output parameter: frame sequence number from ROS2 message
-            * @param timestamp_sec Output parameter: ROS2 timestamp in seconds
-            * @return cv::Mat The image frame, or empty if none available
-            * 
-            * Provides additional timing information along with the frame for synchronization purposes.
-            */
-            cv::Mat get_latest_frame_with_timestamp(
-                uint32_t &frame_index,
-                double &timestamp_sec
-            );
+            // /**
+            // * @brief Get latest frame with frame metadata, via timestamp and frame index
+            // * 
+            // * @param frame_index Output parameter: frame sequence number from ROS2 message
+            // * @param timestamp_sec Output parameter: ROS2 timestamp in seconds
+            // * @return cv::Mat The image frame, or empty if none available
+            // * 
+            // * Provides additional timing information along with the frame for synchronization purposes.
+            // */
+            // cv::Mat get_latest_frame_with_timestamp(
+            //     uint32_t &frame_index,
+            //     double &timestamp_sec
+            // );
 
 
             /**
@@ -165,26 +165,26 @@ namespace camera_subscriber {
 
 
             // ROS2 subscription
-            rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_subscription_;
+            rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_subscription;
 
 
             // Frame buffer with thread safety
-            mutable std::mutex frame_mutex_;
-            std::queue<cv::Mat> frame_queue_;
-            size_t max_queue_size_;
+            mutable std::mutex frame_mutex;
+            std::queue<cv::Mat> frame_queue;
+            size_t max_queue_size;
 
 
-            // Frame metadata for synchronization
-            struct FrameMetadata {
-                uint32_t sequence;
-                double timestamp;
-            };
-            std::queue<FrameMetadata> metadata_queue_;
+            // Flag for started stream
+            bool is_stream_started = false;
 
-            
+
+            // Frame timestamp for synchronization
+            std::queue<uint32_t> timestamp_queue;
+
+
             // Statistics tracking
-            mutable std::mutex stats_mutex_;
-            SubscriptionStats stats_;
+            mutable std::mutex stats_mutex;
+            SubscriptionStats stats;
 
     };
 
