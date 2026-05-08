@@ -1,18 +1,18 @@
 #include <camera_subscriber/ros2_to_opencv.hpp>
 
+#include <algorithm>
+
 namespace camera_subscriber {
 
 
     ROS2ImageSubscriber::ROS2ImageSubscriber(
         const std::string &topic_name,
-        size_t queue_size,
         const std::string &node_name
-    ) : rclcpp::Node(node_name),
-        max_queue_size(queue_size) {
+    ) : rclcpp::Node(node_name) {
         
         RCLCPP_INFO(get_logger(), "Initializing ROS2 Image Subscriber");
         RCLCPP_INFO(get_logger(), "  Topic: %s", topic_name.c_str());
-        RCLCPP_INFO(get_logger(), "  Queue Size: %zu", queue_size);
+        RCLCPP_INFO(get_logger(), "  QoS History Depth: %u", qos_history_depth);
 
         stats.node_name = node_name;
 
@@ -22,7 +22,7 @@ namespace camera_subscriber {
         //      - https://docs.ros.org/en/iron/Concepts/Intermediate/About-Quality-of-Service-Settings.html
         //      - https://docs.ros2.org/foxy/api/rclcpp/classrclcpp_1_1QoS.html
 
-        auto qos_profile = rclcpp::QoS(rclcpp::KeepLast(queue_size))
+        auto qos_profile = rclcpp::QoS(rclcpp::KeepLast(qos_history_depth))
             .best_effort()
             .durability_volatile();
 
@@ -68,16 +68,12 @@ namespace camera_subscriber {
             return;
         };
 
-        // Store frame in queue with thread safety
+        // Store frame in single latest-frame slot with thread safety
         {
             std::lock_guard<std::mutex> lock(frame_mutex);
 
-            // Check if queue at cap
-            // If full, drop oldest frame and metadata
-            if (frame_queue.size() >= max_queue_size) {
-                frame_queue.pop();
-                metadata_queue.pop();
-                
+            // Single-slot buffering: replacing an unread frame counts as dropped.
+            if (has_latest_frame) {
                 std::lock_guard<std::mutex> stats_lock(stats_mutex);
                 stats.frames_dropped++;
             }
@@ -85,15 +81,9 @@ namespace camera_subscriber {
             // Declare that stream starts
             is_stream_started = true;
 
-            // Add new frame to queue
-            frame_queue.push(cv_image.clone()); // Clone to ensure independent memory
-            
-            // Store metadata
-            FrameMetadata metadata;
-            metadata.sequence = msg->header.stamp.sec;
-            metadata.timestamp = static_cast<double>(msg->header.stamp.sec) +
-                                 static_cast<double>(msg->header.stamp.nanosec) / 1e9;
-            metadata_queue.push(metadata);
+            // Store latest frame
+            latest_frame = cv_image.clone(); // Clone to ensure independent memory
+            has_latest_frame = true;
         }
 
     };
@@ -138,39 +128,31 @@ namespace camera_subscriber {
 
         std::lock_guard<std::mutex> lock(frame_mutex);
         
-        // Check if frame queue is empty
-        if (frame_queue.empty()) {
+        // Check if no frame is currently available
+        if (!has_latest_frame) {
             return std::make_tuple(false, cv::Mat());
         }
 
-        // Fetch latest frame and corresponding metadata
-        cv::Mat latest_frame = frame_queue.front();
-        frame_queue.pop();
-        metadata_queue.pop();
+        // Fetch and consume latest frame
+        cv::Mat frame = latest_frame.clone();
+        has_latest_frame = false;
+        latest_frame.release();
 
         // Frame is valid
-        return std::make_tuple(true, latest_frame);
+        return std::make_tuple(true, frame);
 
     };
 
 
-    // Bunch of frame queue handlings
+    // Frame access helpers
 
     bool ROS2ImageSubscriber::has_frames() const {
         std::lock_guard<std::mutex> lock(frame_mutex);
-        return !frame_queue.empty();
-    };
-
-    size_t ROS2ImageSubscriber::get_queue_size() const {
-        std::lock_guard<std::mutex> lock(frame_mutex);
-        return frame_queue.size();
-    };
-
-    size_t ROS2ImageSubscriber::get_max_queue_size() const {
-        return max_queue_size;
+        return has_latest_frame;
     };
 
     bool ROS2ImageSubscriber::is_stream_active() const {
+        std::lock_guard<std::mutex> lock(frame_mutex);
         return is_stream_started;
     };
 
@@ -178,13 +160,8 @@ namespace camera_subscriber {
 
         std::lock_guard<std::mutex> lock(frame_mutex);
 
-        while (!frame_queue.empty()) {
-            frame_queue.pop();
-        }
-
-        while (!metadata_queue.empty()) {
-            metadata_queue.pop();
-        }
+        latest_frame.release();
+        has_latest_frame = false;
 
         RCLCPP_INFO(get_logger(), "Frame buffer cleared");
 

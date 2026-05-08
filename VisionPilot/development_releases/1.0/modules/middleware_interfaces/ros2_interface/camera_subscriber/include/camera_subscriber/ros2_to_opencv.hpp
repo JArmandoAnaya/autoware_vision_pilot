@@ -5,8 +5,8 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
+#include <cstdint>
 #include <mutex>
-#include <queue>
 #include <tuple>
 
 namespace camera_subscriber {
@@ -32,14 +32,12 @@ namespace camera_subscriber {
             * @brief Constructor for ROS2ImageSubscriber
             *
             * @param topic_name The name of the ROS2 topic to subscribe to ("/camera/image_raw", etc.)
-            * @param queue_size Max number of frames to buffer for incoming images (default: 1)
             * @param node_name The name of the ROS2 node (default: "ros2_image_subscriber")
             *
             * The node automatically inits the ROS2 subscription and begins listening for incoming messages.
             */
             explicit ROS2ImageSubscriber(
                 const std::string& topic_name,
-                size_t queue_size = 1,
                 const std::string& node_name = "ros2_image_subscriber"
             );
 
@@ -82,31 +80,15 @@ namespace camera_subscriber {
 
 
             /**
-            * @brief Check if any frames are currently in the queue
+            * @brief Check if a latest frame is currently available
             * 
-            * @return true if frames are available, false otherwise
+            * @return true if a frame is available, false otherwise
             */
             bool has_frames() const;
 
 
             /**
-            * @brief Get current queue size (number of buffered frames)
-            * 
-            * @return Current number of frames in the internal queue
-            */
-            size_t get_queue_size() const;
-
-
-            /**
-            * @brief Get the maximum queue size
-            * 
-            * @return Maximum allowed frames in buffer
-            */
-            size_t get_max_queue_size() const;
-
-
-            /**
-            * @brief Reset the frame buffer (clear all queued frames)
+            * @brief Reset the frame buffer (clear the latest frame slot)
             * 
             * Useful for resetting state or handling error conditions
             */
@@ -129,7 +111,7 @@ namespace camera_subscriber {
             * 
             * @return A struct containing:
             *         - frames_received: total frames received from ROS2
-            *         - frames_dropped: frames dropped when queue was full
+            *         - frames_dropped: frames overwritten before retrieval
             *         - conversion_errors: failed ROS2 => OpenCV conversions
             */
             struct SubscriptionStats {
@@ -154,20 +136,10 @@ namespace camera_subscriber {
 
 
             /**
-            * @struct FrameMetadata
-            * @brief Metadata associated with each frame
-            */
-            struct FrameMetadata {
-                uint32_t sequence = 0;
-                double timestamp = 0.0;
-            };
-
-
-            /**
             * @brief Internal callback function invoked when a new ROS2 image message arrives
             * 
             * Handles thread-safe conversion from sensor_msgs::msg::Image to cv::Mat
-            * and queuing of frames for retrieval by the application.
+            * and updates the latest frame slot for retrieval by the application.
             */
             void image_callback(
                 const sensor_msgs::msg::Image::SharedPtr msg
@@ -192,19 +164,19 @@ namespace camera_subscriber {
             rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_subscription;
 
 
-            // Frame buffer with thread safety
+            // Single latest-frame slot with thread safety
             mutable std::mutex frame_mutex;
-            std::queue<cv::Mat> frame_queue;
-            std::queue<FrameMetadata> metadata_queue;
-            size_t max_queue_size;
+            cv::Mat latest_frame;
+            bool has_latest_frame = false;
 
 
+            // QoS settings for subscription
+            // (KeepLast with hardcoded `depth=1` for single-slot retrieval)
+            uint8_t qos_history_depth = 1;
+
+            
             // Flag for started stream
             bool is_stream_started = false;
-
-
-            // Frame timestamp for synchronization
-            std::queue<uint32_t> timestamp_queue;
 
 
             // Statistics tracking
