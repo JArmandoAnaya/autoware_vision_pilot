@@ -81,4 +81,12 @@ namespace v4l2_interface {
 
     };
 
+
+    V4L2Reader::~V4L2Reader() {
+        if (camera_capture.isOpened()) {
+            camera_capture.release();
+            log_info("V4L2 device closed and resources released");
+        }
+    }
+
 }
