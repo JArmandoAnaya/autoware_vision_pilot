@@ -87,6 +87,85 @@ namespace v4l2_interface {
             camera_capture.release();
             log_info("V4L2 device closed and resources released");
         }
-    }
+    };
+
+
+    std::tuple<bool, cv::Mat> V4L2Reader::get_latest_frame() {
+        
+        if (!camera_capture.isOpened()) {
+            {
+                std::lock_guard<std::mutex> stats_lock(stats_mutex);
+                stats.capture_errors++;
+            }
+            log_warning("Cannot capture frame: V4L2 device is not open");
+            return std::make_tuple(false, cv::Mat());
+        }
+
+        // Core one-liner frame capture from V4L2 stream
+        cv::Mat frame;
+        camera_capture >> frame;
+
+        // Declare stream has started
+        is_stream_started = true;
+
+        if (frame.empty()) {
+            {
+                std::lock_guard<std::mutex> stats_lock(stats_mutex);
+                stats.capture_errors++;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return std::make_tuple(false, cv::Mat());
+        }
+
+        // Process captured frame
+        cv::Mat processed_frame = process_v4l2_frame(frame);
+
+        if (processed_frame.empty()) {
+            {
+                std::lock_guard<std::mutex> stats_lock(stats_mutex);
+                stats.capture_errors++;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return std::make_tuple(false, cv::Mat());
+        }
+
+        // Store frame in single latest-frame slot with thread safety
+        {
+            std::lock_guard<std::mutex> lock(frame_mutex);
+
+            // Single-slot buffering
+            if (has_latest_frame) {
+                std::lock_guard<std::mutex> stats_lock(stats_mutex);
+            }
+
+            // Store latest frame
+            latest_frame = processed_frame.clone();
+            has_latest_frame = true;
+        }
+
+        // Update statistics
+        {
+            std::lock_guard<std::mutex> stats_lock(stats_mutex);
+            stats.frames_captured++;
+        }
+
+        // Apply display rate throttling
+        {
+            std::lock_guard<std::mutex> lock(display_time_mutex);
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_display_time).count();
+            
+            if (elapsed_ms >= display_frame_period_ms) {
+                last_display_time = now;
+                return std::make_tuple(true, processed_frame);
+            } else {
+                // Sleep until it's time to display the next frame
+                std::this_thread::sleep_for(std::chrono::milliseconds(display_frame_period_ms - elapsed_ms));
+                last_display_time = std::chrono::steady_clock::now();
+                return std::make_tuple(true, processed_frame);
+            }
+        }
+    };
+
 
 }
