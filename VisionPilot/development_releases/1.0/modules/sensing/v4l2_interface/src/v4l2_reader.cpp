@@ -189,4 +189,38 @@ namespace v4l2_interface {
     }
 
 
+    // Statistics handling
+
+    
+    V4L2Reader::CaptureStats V4L2Reader::get_stats() const {
+        std::lock_guard<std::mutex> lock(stats_mutex);
+        return stats;
+    }
+
+
+    void V4L2Reader::reset_stats() {
+        std::lock_guard<std::mutex> lock(stats_mutex);
+        stats.frames_captured = 0;
+        stats.capture_errors = 0;
+        log_info("Statistics reset");
+    }
+
+
+    // Logging helpers
+
+    void V4L2Reader::log_info(const std::string& message) const {
+        std::cout << "[V4L2Reader INFO] " << message << std::endl;
+    }
+
+
+    void V4L2Reader::log_warning(const std::string& message) const {
+        std::cerr << "[V4L2Reader WARNING] " << message << std::endl;
+    }
+
+
+    void V4L2Reader::log_error(const std::string& message) const {
+        std::cerr << "[V4L2Reader ERROR] " << message << std::endl;
+    }
+
+
 }
