@@ -10,6 +10,14 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+# ROS2 packages
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+
+# OpenCV packages
+find_package(OpenCV REQUIRED)
+find_package(cv_bridge REQUIRED)
+
 # Modules
 add_subdirectory(modules/control)
 
