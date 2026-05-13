@@ -5,8 +5,7 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image, ImageDraw
 from argparse import ArgumentParser
-sys.path.append('../..')
-from inference.ego_lanes_infer import EgoLanesNetworkInfer
+from Models.inference.ego_lanes_infer import EgoLanesNetworkInfer
 from image_visualization import make_visualization
 
 FRAME_INF_SIZE = (640, 320)

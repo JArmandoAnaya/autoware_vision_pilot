@@ -21,6 +21,8 @@ Containerized EgoLanes Demo, semantic segmentation of driving lanes.
 
 After the container is running, you can access the visualization by opening the following URL in your browser:
 
-<http://localhost:6080/vnc.html?resize=scale&autoconnect=true&password=visualizer>
+<http://127.0.0.1:6080/vnc.html?resize=scale&autoconnect=true&password=visualizer>
+
+> **Note:** Use `127.0.0.1` instead of `localhost`. On systems where `localhost` resolves to IPv6 (`::1`), the connection will fail as Podman's `pasta` network backend only handles IPv4.
 
 The output shows semantic segmentation of the driving lanes of the input video in real-time.

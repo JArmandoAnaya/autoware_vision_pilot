@@ -1,8 +1,6 @@
 import torch
 from torchvision import transforms
-import sys
-sys.path.append("..")
-from model_components.ego_lanes_network import EgoLanesNetwork
+from Models.model_components.ego_lanes_network import EgoLanesNetwork
 
 
 class EgoLanesNetworkInfer():
