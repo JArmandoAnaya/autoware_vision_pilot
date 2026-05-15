@@ -1,120 +1,333 @@
 #include <camera_subscriber/ros2_to_opencv.hpp>
 #include <v4l2_interface/v4l2_reader.hpp>
-
-#include <chrono>
-#include <iostream>
-#include <string>
-#include <vector>
-#include <thread>
-
 #include <visualization/visualization.hpp>
 
-int main(int argc, char** argv) {
+#include <engine/onnx_engine.hpp>
+#include <models/auto_drive.hpp>
+#include <models/auto_steer.hpp>
+#include <models/auto_speed.hpp>
 
-    // For now, first argument is either 0 (for ROS2) or 1 (for V4L2):
-    // - If 0: second argument is ROS2 topic name (default: "/camera/image")
-    // - If 1:
-    //      - Second argument is V4L2 device path (default: "/dev/video0")
-    //      - Third argument is FPS (default: 10)
+#include <opencv2/opencv.hpp>
+
+#include <array>
+#include <chrono>
+#include <cstring>
+#include <future>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Config
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct Config {
+    // Model file paths
+    std::string autodrive_model = "models/autodrive.onnx";
+    std::string autosteer_model = "models/autosteer.onnx";
+    std::string autospeed_model = "models/autospeed.onnx";
+
+    // ORT engine — set provider/precision at startup
+    engine::EngineConfig engine;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-frame result bundle
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct FrameOutputs {
+    models::AutoDriveOutput auto_drive;
+    models::AutoSteerOutput auto_steer;
+    models::AutoSpeedOutput auto_speed;
+    uint64_t frame_id = 0;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// InferencePipeline
+//
+// Owns the 2-slot circular frame buffer and the three model instances.
+// Caller is responsible for spatial pre-processing (warp/crop/resize to
+// NET_W × NET_H) before calling process().  Normalization to CHW float32
+// is done here, once per normalization variant, before any threads start.
+//
+// Parallelism:
+//   All three models run concurrently via std::async.
+//   process() blocks until the slowest model finishes:
+//     wall-time ≈ max(T_autodrive, T_autosteer, T_autospeed)
+//
+// Thread safety:
+//   process() is NOT thread-safe; call from a single capture/inference thread.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class InferencePipeline {
+public:
+    static constexpr int NET_H    = 512;
+    static constexpr int NET_W    = 1024;
+    static constexpr int CHW_SIZE = 3 * NET_H * NET_W;  // 1 572 864 floats
+
+    InferencePipeline(engine::OnnxEngine& ort_engine, const Config& cfg)
+        : auto_drive_(ort_engine, cfg.autodrive_model)
+        , auto_steer_(ort_engine, cfg.autosteer_model)
+        , auto_speed_(ort_engine, cfg.autospeed_model)
+    {}
+
+    // Push a pre-processed BGR frame (must already be NET_W × NET_H).
+    // Returns nullopt on the very first call — AutoDrive needs prev + curr.
+    std::optional<FrameOutputs> process(const cv::Mat& frame_bgr)
+    {
+        // ── 1. Write into the circular buffer ────────────────────────────
+        // Slots alternate: slot 0 ↔ slot 1 every frame.
+        // After the write:
+        //   frame_buffer_[write_idx_]          = current frame
+        //   frame_buffer_[(write_idx_+1) % 2]  = previous frame
+        write_idx_ = (write_idx_ + 1) % 2;
+        frame_buffer_[write_idx_] = frame_bgr.clone();
+        ++frame_count_;
+
+        if (frame_count_ < 2) {
+            // First frame stored; no previous frame yet — skip inference.
+            return std::nullopt;
+        }
+
+        const int prev_idx = (write_idx_ + 1) % 2;
+
+        // ── 2. Build CHW tensors before launching threads ─────────────────
+        //
+        //  AutoDrive  needs ImageNet-normalised CHW for both prev and curr.
+        //  AutoSteer  needs [0,1]-scaled CHW for curr only.
+        //  AutoSpeed  needs [0,1]-scaled CHW for curr only (shared with steer).
+        //
+        //  These vectors are heap-allocated here and captured by reference
+        //  inside the lambdas below.  All futures are .get()'d before this
+        //  function returns, so the lifetimes are safe.
+        std::vector<float> prev_imagenet = to_chw_imagenet(frame_buffer_[prev_idx]);
+        std::vector<float> curr_imagenet = to_chw_imagenet(frame_buffer_[write_idx_]);
+        std::vector<float> curr_01       = to_chw_01(frame_buffer_[write_idx_]);
+
+        // ── 3. Launch all three inferences concurrently ──────────────────
+        auto f_drive = std::async(std::launch::async, [&] {
+            return auto_drive_.infer(prev_imagenet.data(), curr_imagenet.data());
+        });
+
+        auto f_steer = std::async(std::launch::async, [&] {
+            return auto_steer_.infer(curr_01.data());
+        });
+
+        // AutoSpeed shares curr_01 — read-only, no race condition.
+        auto f_speed = std::async(std::launch::async, [&] {
+            return auto_speed_.infer(curr_01.data());
+        });
+
+        // ── 4. Barrier — block until every model finishes ────────────────
+        //
+        //  .get() calls are sequential but the underlying work ran in
+        //  parallel.  Total wall time ≈ max(T_drive, T_steer, T_speed).
+        //
+        //  If any model throws, the exception propagates here, leaving the
+        //  remaining futures to be collected before they go out of scope.
+        FrameOutputs out;
+        out.auto_drive = f_drive.get();
+        out.auto_steer = f_steer.get();
+        out.auto_speed = f_speed.get();
+        out.frame_id   = frame_count_;
+
+        return out;
+    }
+
+private:
+    // ── Normalization helpers ─────────────────────────────────────────────
+
+    static constexpr float MEAN[3] = {0.485f, 0.456f, 0.406f};
+    static constexpr float STD[3]  = {0.229f, 0.224f, 0.225f};
+
+    // BGR → RGB → float32 → ImageNet normalise → CHW
+    static std::vector<float> to_chw_imagenet(const cv::Mat& bgr)
+    {
+        cv::Mat rgb;
+        cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+
+        cv::Mat f32;
+        rgb.convertTo(f32, CV_32FC3, 1.0 / 255.0);
+
+        std::vector<cv::Mat> ch(3);
+        cv::split(f32, ch);
+
+        std::vector<float> out(CHW_SIZE);
+        for (int c = 0; c < 3; ++c) {
+            float*       dst = out.data() + c * NET_H * NET_W;
+            const float* src = reinterpret_cast<const float*>(ch[c].data);
+            for (int i = 0; i < NET_H * NET_W; ++i)
+                dst[i] = (src[i] - MEAN[c]) / STD[c];
+        }
+        return out;
+    }
+
+    // BGR → RGB → float32 [0, 1] → CHW
+    static std::vector<float> to_chw_01(const cv::Mat& bgr)
+    {
+        cv::Mat rgb;
+        cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+
+        cv::Mat f32;
+        rgb.convertTo(f32, CV_32FC3, 1.0 / 255.0);
+
+        std::vector<cv::Mat> ch(3);
+        cv::split(f32, ch);
+
+        std::vector<float> out(CHW_SIZE);
+        for (int c = 0; c < 3; ++c) {
+            float* dst = out.data() + c * NET_H * NET_W;
+            std::memcpy(dst, ch[c].data, NET_H * NET_W * sizeof(float));
+        }
+        return out;
+    }
+
+    // ── State ─────────────────────────────────────────────────────────────
+
+    models::AutoDrive auto_drive_;
+    models::AutoSteer auto_steer_;
+    models::AutoSpeed auto_speed_;
+
+    // 2-slot circular buffer of pre-processed BGR frames.
+    // write_idx_ starts at 1 so the first write goes to slot 0.
+    std::array<cv::Mat, 2> frame_buffer_;
+    int      write_idx_   = 1;
+    uint64_t frame_count_ = 0;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spatial pre-processing  (warp / crop / resize → NET_W × NET_H)
+//
+// In production this will apply the homography warp + 50° FOV crop.
+// For now: simple resize as a placeholder.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static cv::Mat spatial_preprocess(const cv::Mat& raw)
+{
+    cv::Mat out;
+    cv::resize(raw, out,
+               cv::Size(InferencePipeline::NET_W, InferencePipeline::NET_H),
+               0, 0, cv::INTER_LINEAR);
+    return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// main
+// ─────────────────────────────────────────────────────────────────────────────
+
+int main(int argc, char** argv)
+{
+    // ── Usage ────────────────────────────────────────────────────────────────
+    // argv[1] : mode   0 = ROS2  |  1 = V4L2
+    // argv[2] : ROS2 topic  /  V4L2 device path
+    // argv[3] : (V4L2 only) target FPS
 
     if (argc < 2) {
-        std::cout << "Usage: " << argv[0] << " [mode] [args...]\n";
-        std::cout << "  mode: 0 for ROS2, 1 for V4L2\n";
-        std::cout << "  For ROS2 mode: [topic_name]\n";
-        std::cout << "  For V4L2 mode: [device_path] [fps]\n";
+        std::cout << "Usage: " << argv[0] << " [mode] [args...]\n"
+                  << "  mode 0 (ROS2): [topic]           default: /camera/image\n"
+                  << "  mode 1 (V4L2): [device] [fps]   default: /dev/video0  10\n";
         return 1;
-    } else {
+    }
 
-        int mode = std::stoi(argv[1]);
+    // ── Engine + pipeline setup ──────────────────────────────────────────────
+    Config cfg;
+    // TODO: load cfg from a config file; hardcoded defaults for now.
+    cfg.engine.provider = "cpu";
 
-        // ==================================== ROS2 MODE ====================================
+    engine::OnnxEngine ort_engine(cfg.engine);
+    InferencePipeline  pipeline(ort_engine, cfg);
 
-        if (mode == 0) {
+    const int mode = std::stoi(argv[1]);
 
-            std::string topic = "/camera/image";
-            if (argc > 2) {
-                topic = argv[2];
+    // ════════════════════════════════════════════════════════════════════════
+    // ROS2 MODE
+    // ════════════════════════════════════════════════════════════════════════
+    if (mode == 0) {
+
+        const std::string topic = (argc > 2) ? argv[2] : "/camera/image";
+        std::cout << "[VisionPilot] ROS2 mode | topic: " << topic << "\n";
+
+        camera_subscriber::ROS2ImageSubscriber ros2_sub(topic);
+
+        while (true) {
+            auto [has_frame, frame] = ros2_sub.get_latest_frame();
+
+            if (!has_frame || frame.empty()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            cv::Mat preprocessed = spatial_preprocess(frame);
+            auto result = pipeline.process(preprocessed);
+
+            if (!result) {
+                // First frame — buffer warming up, nothing to output yet.
+                continue;
+            }
+
+            // ── Downstream: use result->auto_drive / auto_steer / auto_speed
+            // TODO: hand off to planning / control / visualization modules.
+
+            auto stats = ros2_sub.get_stats();
+            std::vector<std::string> overlay = {
+                "topic: "            + topic,
+                "frame: "            + std::to_string(result->frame_id),
+                "frames received: "  + std::to_string(stats.frames_received),
+                "frames dropped: "   + std::to_string(stats.frames_dropped),
             };
-            std::cout << "Starting in ROS2 mode with topic: " << topic << "\n";
+            visualization::render_frame(frame, "VisionPilot", overlay);
+        }
 
-            // Init reader instance
-            camera_subscriber::ROS2ImageSubscriber ros2_subscriber(topic);
+        visualization::close_windows();
 
-            // Main loop
-            while (true) {
-                auto [has_frame, frame] = ros2_subscriber.get_latest_frame();
+    // ════════════════════════════════════════════════════════════════════════
+    // V4L2 MODE
+    // ════════════════════════════════════════════════════════════════════════
+    } else if (mode == 1) {
 
-                if (has_frame && !frame.empty()) {
-                    auto stats = ros2_subscriber.get_stats();
-                    std::vector<std::string> overlay_strs = {
-                        "topic: " + topic,
-                        "frames received: " + std::to_string(stats.frames_received),
-                        "frames dropped: " + std::to_string(stats.frames_dropped),
-                        "conversion errors: " + std::to_string(stats.conversion_errors)
-                    };
+        const std::string device_path = (argc > 2) ? argv[2] : "/dev/video0";
+        const uint32_t    target_fps  = (argc > 3) ? static_cast<uint32_t>(std::stoi(argv[3])) : 10;
 
-                    visualization::render_frame(
-                        frame, 
-                        "VisionPilot", 
-                        overlay_strs
-                    );
-                };
+        std::cout << "[VisionPilot] V4L2 mode | device: " << device_path
+                  << "  fps: " << target_fps << "\n";
 
-                std::this_thread::sleep_for(std::chrono::milliseconds(33));
-            };
-
-            visualization::close_windows();
-
-        // ==================================== V4L2 MODE ====================================
-
-        } else if (mode == 1) {
-
-            std::string device_path = "/dev/video0";
-            uint32_t target_fps = 10;
-            if (argc > 2) {
-                device_path = argv[2];
-            };
-            if (argc > 3) {
-                target_fps = static_cast<uint32_t>(std::stoi(argv[3]));
-            };
-            std::cout << "Starting in V4L2 mode with device: " << device_path 
-                      << " and FPS: " << target_fps << "\n";
-
-            // Init reader instance
-            v4l2_interface::V4L2Reader v4l2_reader(device_path, target_fps);
-            if (!v4l2_reader.is_device_open()) {
-                std::cerr << "Failed to open V4L2 device: " << device_path << std::endl;
-                return 1;
-            };
-
-            // Main loop
-            while (true) {
-                auto [has_frame, frame] = v4l2_reader.get_latest_frame();
-
-                if (has_frame && !frame.empty()) {
-                    auto stats = v4l2_reader.get_stats();
-                    std::vector<std::string> overlay_strs = {
-                        "device: " + device_path,
-                        "frames captured: " + std::to_string(stats.frames_captured),
-                        "capture errors: " + std::to_string(stats.capture_errors),
-                        "resolution: " + std::to_string(stats.current_width) + "x" +
-                            std::to_string(stats.current_height),
-                        "fps: " + std::to_string(static_cast<int>(stats.current_fps))
-                    };
-
-                    visualization::render_frame(frame, "VisionPilot", overlay_strs);
-                };
-            };
-
-            visualization::close_windows();
-
-        // ==================================== INVALID MODE INPUT ====================================
-
-        } else {
-            std::cout << "Invalid mode. Use 0 for ROS2 or 1 for V4L2.\n";
+        v4l2_interface::V4L2Reader v4l2_reader(device_path, target_fps);
+        if (!v4l2_reader.is_device_open()) {
+            std::cerr << "[VisionPilot] Failed to open V4L2 device: " << device_path << "\n";
             return 1;
         }
 
+        while (true) {
+            auto [has_frame, frame] = v4l2_reader.get_latest_frame();
+
+            if (!has_frame || frame.empty()) continue;
+
+            cv::Mat preprocessed = spatial_preprocess(frame);
+            auto result = pipeline.process(preprocessed);
+
+            if (!result) continue;
+
+            // ── Downstream: use result->auto_drive / auto_steer / auto_speed
+            // TODO: hand off to planning / control / visualization modules.
+
+            auto stats = v4l2_reader.get_stats();
+            std::vector<std::string> overlay = {
+                "device: "    + device_path,
+                "frame: "     + std::to_string(result->frame_id),
+                "fps: "       + std::to_string(static_cast<int>(stats.current_fps)),
+                "resolution: "+ std::to_string(stats.current_width) + "x"
+                              + std::to_string(stats.current_height),
+            };
+            visualization::render_frame(frame, "VisionPilot", overlay);
+        }
+
+        visualization::close_windows();
+
+    } else {
+        std::cerr << "[VisionPilot] Invalid mode. Use 0 (ROS2) or 1 (V4L2).\n";
+        return 1;
     }
 
     return 0;
