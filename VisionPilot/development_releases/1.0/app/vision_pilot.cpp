@@ -117,6 +117,45 @@ struct FrameOutputs {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CircularFrameBuffer<N>
+//
+// Fixed-capacity ring of cv::Mat frames.  push() overwrites the oldest slot.
+// ready() returns true once at least N frames have been pushed.
+// operator[](0) = most recent, operator[](1) = one before, etc.
+// ─────────────────────────────────────────────────────────────────────────────
+
+template<int N>
+class CircularFrameBuffer {
+public:
+    void push(const cv::Mat& frame)
+    {
+        head_ = (head_ + N - 1) % N;   // move head backwards (newest slot)
+        slots_[head_] = frame.clone();
+        if (count_ < N) ++count_;
+    }
+
+    bool ready() const { return count_ >= N; }
+
+    // [0] = newest, [1] = previous, ...
+    const cv::Mat& operator[](int age) const
+    {
+        return slots_[(head_ + age) % N];
+    }
+
+    void clear()
+    {
+        for (auto& s : slots_) s.release();
+        head_  = 0;
+        count_ = 0;
+    }
+
+private:
+    std::array<cv::Mat, N> slots_;
+    int head_  = 0;
+    int count_ = 0;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // InferencePipeline
 //
 // Owns the 2-slot circular frame buffer and the three model instances.
@@ -150,27 +189,21 @@ public:
     // record_latency=false for GPU warmup passes (not counted in EMA).
     std::optional<FrameOutputs> process(const cv::Mat& frame_bgr, bool record_latency = true)
     {
-        // ── 1. Write into the circular buffer ────────────────────────────
-        // Slots alternate: slot 0 ↔ slot 1 every frame.
-        // After the write:
-        //   frame_buffer_[write_idx_]          = current frame
-        //   frame_buffer_[(write_idx_+1) % 2]  = previous frame
-        write_idx_ = (write_idx_ + 1) % 2;
-        frame_buffer_[write_idx_] = frame_bgr.clone();
+        // ── 1. Push into circular buffer ─────────────────────────────────
+        frames_.push(frame_bgr);
         ++frame_count_;
 
-        if (frame_count_ < 2) {
-            // First frame stored; no previous frame yet — skip inference.
-            return std::nullopt;
+        if (!frames_.ready()) {
+            return std::nullopt;  // need at least 2 frames for AutoDrive
         }
 
-        const int prev_idx = (write_idx_ + 1) % 2;
+        // frames_[0] = current, frames_[1] = previous
 
         // ── 2. Build CHW tensors ──────────────────────────────────────────
         auto t_pre_start = Clock::now();
-        std::vector<float> prev_imagenet = to_chw_imagenet(frame_buffer_[prev_idx]);
-        std::vector<float> curr_imagenet = to_chw_imagenet(frame_buffer_[write_idx_]);
-        std::vector<float> curr_01       = to_chw_01(frame_buffer_[write_idx_]);
+        std::vector<float> prev_imagenet = to_chw_imagenet(frames_[1]);
+        std::vector<float> curr_imagenet = to_chw_imagenet(frames_[0]);
+        std::vector<float> curr_01       = to_chw_01(frames_[0]);
         const double preprocess_ms = Ms(Clock::now() - t_pre_start).count();
 
         // ── 3. Launch all three inferences concurrently ──────────────────
@@ -215,10 +248,8 @@ public:
 
     void reset()
     {
-        frame_buffer_[0].release();
-        frame_buffer_[1].release();
-        write_idx_       = 1;
-        frame_count_     = 0;
+        frames_.clear();
+        frame_count_  = 0;
         latency_stats_.reset();
     }
 
@@ -278,11 +309,8 @@ private:
     visionpilot::models::AutoSteer auto_steer_;
     visionpilot::models::AutoSpeed auto_speed_;
 
-    // 2-slot circular buffer of pre-processed BGR frames.
-    // write_idx_ starts at 1 so the first write goes to slot 0.
-    std::array<cv::Mat, 2> frame_buffer_;
-    int          write_idx_    = 1;
-    uint64_t     frame_count_  = 0;
+    CircularFrameBuffer<2> frames_;
+    uint64_t               frame_count_ = 0;
     LatencyStats latency_stats_;
 };
 
