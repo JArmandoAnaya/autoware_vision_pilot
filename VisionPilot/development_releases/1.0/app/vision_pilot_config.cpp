@@ -111,7 +111,23 @@ bool file_exists(const std::string& path)
     return !path.empty() && std::filesystem::is_regular_file(path);
 }
 
+bool parse_bool(const std::string& s, const std::string& key)
+{
+    if (s == "1" || s == "true" || s == "True" || s == "yes" || s == "on") return true;
+    if (s == "0" || s == "false" || s == "False" || s == "no" || s == "off") return false;
+    throw std::runtime_error("Invalid boolean for " + key + ": " + s);
+}
+
 }  // namespace
+
+SourceMode parse_source_mode(const std::string& value)
+{
+    if (value == "0" || value == "ros2") return SourceMode::Ros2;
+    if (value == "1" || value == "v4l2") return SourceMode::V4l2;
+    if (value == "2" || value == "video") return SourceMode::Video;
+    throw std::runtime_error(
+        "Invalid source.mode: '" + value + "'. Use video | ros2 | v4l2 (or 0/1/2)");
+}
 
 VisionPilotConfig load_vision_pilot_config(const std::string& config_path)
 {
@@ -122,11 +138,36 @@ VisionPilotConfig load_vision_pilot_config(const std::string& config_path)
     cfg.autosteer_model = expand_user_path(require_key(kv, "models.autosteer_path"));
     cfg.autospeed_model = expand_user_path(require_key(kv, "models.autospeed_path"));
 
-    cfg.engine.provider     = optional_key(kv, "engine.provider", "cpu");
-    cfg.engine.precision    = optional_key(kv, "engine.precision", "fp32");
-    cfg.engine.device_id    = parse_int(optional_key(kv, "engine.device_id", "0"), "engine.device_id");
-    cfg.engine.cache_dir    = expand_user_path(optional_key(kv, "engine.cache_dir", "/tmp/visionpilot_trt_cache"));
-    cfg.engine.workspace_gb = parse_double(optional_key(kv, "engine.workspace_gb", "1.0"), "engine.workspace_gb");
+    cfg.engine_cfg.provider     = optional_key(kv, "engine.provider", "cpu");
+    cfg.engine_cfg.precision    = optional_key(kv, "engine.precision", "fp32");
+    cfg.engine_cfg.device_id    = parse_int(optional_key(kv, "engine.device_id", "0"), "engine.device_id");
+    cfg.engine_cfg.cache_dir    = expand_user_path(optional_key(kv, "engine.cache_dir", "/tmp/visionpilot_trt_cache"));
+    cfg.engine_cfg.workspace_gb = parse_double(optional_key(kv, "engine.workspace_gb", "1.0"), "engine.workspace_gb");
+
+    cfg.source.mode = parse_source_mode(optional_key(kv, "source.mode", "video"));
+    cfg.source.video_path = expand_user_path(optional_key(kv, "source.video_path", ""));
+    cfg.source.video_realtime = parse_bool(
+        optional_key(kv, "source.video_realtime", "true"), "source.video_realtime");
+    cfg.source.video_loop = parse_bool(
+        optional_key(kv, "source.video_loop", "false"), "source.video_loop");
+    cfg.source.ros2_topic   = optional_key(kv, "source.ros2_topic", "/camera/image");
+    cfg.source.v4l2_device  = optional_key(kv, "source.v4l2_device", "/dev/video0");
+    cfg.source.v4l2_fps     = parse_int(optional_key(kv, "source.v4l2_fps", "10"), "source.v4l2_fps");
+
+    cfg.pipeline.initial_inference_check = parse_bool(
+        optional_key(kv, "pipeline.initial_inference_check", "true"),
+        "pipeline.initial_inference_check");
+
+    if (cfg.source.mode == SourceMode::Video) {
+        if (cfg.source.video_path.empty()) {
+            throw std::runtime_error(
+                "source.mode=video requires source.video_path in config");
+        }
+        if (!file_exists(cfg.source.video_path)) {
+            throw std::runtime_error(
+                "source.video_path does not exist: " + cfg.source.video_path);
+        }
+    }
 
     for (const auto& [label, path] : std::vector<std::pair<const char*, const std::string&>>{
              {"models.autodrive_path", cfg.autodrive_model},
