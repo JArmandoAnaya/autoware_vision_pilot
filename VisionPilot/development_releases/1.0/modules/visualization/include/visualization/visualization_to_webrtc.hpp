@@ -18,6 +18,7 @@ namespace visualization {
 
         public:
             
+        
             /**
             * @brief Config options for the WebRTC streamer.
             * Provides parameters for WebRTC connection and streaming behavior.
@@ -112,6 +113,14 @@ namespace visualization {
             * @return Browser URL for WebRTC stream
             */
             std::string browser_url() const;
+
+
+            /**
+            * @brief Internal implementation details for WebRTC streamer.
+            * Kinda manages WebRTC connection management, frame encoding, and streaming logic etc.
+            */
+            struct Impl;
+
 
         private:
             // Internal implementation details (e.g., WebRTC connection, encoding, etc.)
