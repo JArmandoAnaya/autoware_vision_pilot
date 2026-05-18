@@ -4,7 +4,7 @@ find_package(OpenCV REQUIRED)
 
 add_library(visualization
         src/visualization.cpp
-        src/visualization_to_rtsp.cpp
+        src/visualization_to_webrtc.cpp
 )
 
 target_include_directories(visualization
