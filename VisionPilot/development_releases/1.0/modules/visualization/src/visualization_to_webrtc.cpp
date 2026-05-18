@@ -75,6 +75,48 @@ namespace visualization {
         };
 
 
+        // Helper func to ensure all received frames are in BGR format for WebRTC streaming
+        cv::Mat ensure_bgr_frame(
+            const cv::Mat & frame
+        ) {
+
+            // Return empty frame as is
+            if (frame.empty()) {
+                return frame;
+            };
+
+            // If already in BGR format, return as is (or clone if not continuous)
+            if (frame.type() == CV_8UC3) {
+                return frame.isContinuous() ? frame : frame.clone();
+            };
+
+            // Convert grayscale or BGRA frames to BGR format for WebRTC streaming
+            cv::Mat converted;
+            if (frame.type() == CV_8UC1) {          // If grayscale
+                cv::cvtColor(
+                    frame, 
+                    converted, 
+                    cv::COLOR_GRAY2BGR
+                );
+            } else if (frame.type() == CV_8UC4) {   // If BGRA
+                cv::cvtColor(
+                    frame,
+                    converted,
+                    cv::COLOR_BGRA2BGR
+                );
+            } else {                                // For other formats, try direct conversion
+                frame.convertTo(
+                    converted,
+                    CV_8UC3
+                );
+                if (converted.channels() != 3) {
+                    return cv::Mat();
+                };
+            };
+
+        };
+
+
     };
 
 }
