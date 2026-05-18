@@ -52,6 +52,29 @@ namespace visualization {
             * Cleans up WebRTC resources and connections.
             */
             ~WebRTCStreamer();
+            WebRTCStreamer(const WebRTCStreamer&) = delete;
+            WebRTCStreamer& operator=(const WebRTCStreamer&) = delete;
+
+
+            // STREAM HANDLING FUNCS
+
+            
+            /**
+            * @brief Start the WebRTC streaming session.
+            * Establishes connection to signaling server and prepares for streaming.
+            * @return true if streaming started successfully, false otherwise
+            */
+            bool start();
+
+
+            /**
+            * @brief Stop the WebRTC streaming session.
+            * Closes WebRTC connections and cleans up resources.
+            * @return true if streaming stopped successfully, false otherwise
+            */
+            bool stop();
+
+            
 
         private:
             // Internal implementation details (e.g., WebRTC connection, encoding, etc.)
