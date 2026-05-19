@@ -787,7 +787,46 @@ namespace visualization {
                 signal.c_str()
             );
         }
-        
+
     };
+
+
+    // Queue remote ICE candidate to be added once remote description is set
+    // Or add immediately if already ready
+    void WebRTCStreamer::Impl::queue_remote_candidate(
+        int sdp_mline_index, 
+        const std::string & candidate
+    ) {
+
+        std::lock_guard<std::mutex> lock(remote_candidate_mutex);
+        pending_remote_candidates.emplace_back(
+            sdp_mline_index, 
+            candidate
+        );
+
+    };
+
+    
+    // Flush any pending remote ICE candidates that were received before remote description was set
+    void WebRTCStreamer::Impl::flush_pending_remote_candidates()
+    {
+        
+        std::vector<std::pair<int, std::string>> queued_candidates;
+        
+        {
+            std::lock_guard<std::mutex> lock(remote_candidate_mutex);
+            queued_candidates.swap(pending_remote_candidates);
+        }
+
+        for (const auto & candidate : queued_candidates) {
+            handle_remote_candidate(
+                this, 
+                candidate.first, 
+                candidate.second
+            );
+        }
+
+    };
+
 
 }
