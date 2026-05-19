@@ -50,9 +50,7 @@ namespace visualization {
             const std::string& sdp_offer
         ) {
 
-            return  std::string{
-                        "{ \"type\": \"offer\", \"sdp\": \""
-                    } +                                                 \
+            return  std::string{"{ \"type\": \"offer\", \"sdp\": \""} + \
                     escape_json(sdp_offer) + "\" }";
 
         };
@@ -64,12 +62,10 @@ namespace visualization {
             const std::string& candidate
         ) {
 
-            return  std::string{
-                    "{ \"type\": \"candidate\", \"sdpMLineIndex\": "
-                    } +                                                 \
-                    std::to_string(sdp_mline_index) +                   \
-                    ", \"candidate\": \"" +                             \
-                    escape_json(candidate) +                            \
+            return  std::string{"{ \"type\": \"candidate\", \"sdpMLineIndex\": "} + \
+                    std::to_string(sdp_mline_index) + \
+                    ", \"candidate\": \"" + \
+                    escape_json(candidate) + \
                     "\" }";
 
         };
@@ -283,7 +279,41 @@ namespace visualization {
         };
 
         
+        // Handle signaling messages based on their type (SDP offers and ICE candidates)
+        const gchar *signal_type = json_object_get_string_member(object, "type");
+
+        // Handle SDP answer messages to set remote description
+        if (
+            (g_strcmp0(signal_type, "answer") == 0) && 
+            (json_object_has_member(object, "sdp"))
+        ) {
+            handle_remote_description(
+                impl, 
+                json_object_get_string_member(object, "sdp")
+            );
+        // Handle ICE candidate messages
+        } else if (
+            (g_strcmp0(signal_type, "candidate") == 0) && 
+            (json_object_has_member(object, "candidate")) && 
+            (json_object_has_member(object, "sdpMLineIndex"))
+        ) {
+            const int sdp_mline_index = json_object_get_int_member(object, "sdpMLineIndex");
+            const std::string candidate = json_object_get_string_member(object, "candidate");
+
+            // If remote description is already set, add candidate immediately
+            if (impl->remote_description_ready.load(std::memory_order_acquire)) {
+                handle_remote_candidate(impl, sdp_mline_index, candidate);
+            // Otherwise, queue candidate to be added once remote description is set
+            } else {
+                impl->queue_remote_candidate(sdp_mline_index, candidate);
+            }
+        };
+
+        g_object_unref(parser);
 
     };
+
+
+    
 
 }
