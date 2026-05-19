@@ -566,7 +566,67 @@ namespace visualization {
         running.store(true, std::memory_order_release);
 
         return true;
-        
+
     };
+
+
+    // Stop streaming, clean up resources, and shut down server
+    void WebRTCStreamer::Impl::stop()
+    {
+        
+        // Stop streaming loop, prevent new frames from being pushed
+        running.store(false, std::memory_order_release);
+
+        if (pipeline != nullptr) {
+            gst_element_set_state(pipeline, GST_STATE_NULL);
+        }
+
+        if (main_loop != nullptr) {
+            g_main_loop_quit(main_loop);
+        }
+
+        if (server_thread.joinable()) {
+            server_thread.join();
+        }
+
+        // Thread-safely clean up GStreamer elements and server resources
+        {
+            std::lock_guard<std::mutex> lock(signal_mutex);
+            if (client_connection_ != nullptr) {
+                g_object_unref(client_connection_);
+                client_connection_ = nullptr;
+            }
+        }
+
+        if (appsrc != nullptr) {
+            gst_object_unref(appsrc);
+            appsrc = nullptr;
+        }
+
+        if (webrtc_ != nullptr) {
+            gst_object_unref(webrtc_);
+            webrtc_ = nullptr;
+        }
+
+        if (pipeline != nullptr) {
+            gst_object_unref(pipeline);
+            pipeline = nullptr;
+        }
+
+        if (server != nullptr) {
+            soup_server_disconnect(server);
+            g_object_unref(server);
+            server = nullptr;
+        }
+
+        if (main_loop != nullptr) {
+            g_main_loop_unref(main_loop);
+            main_loop = nullptr;
+        }
+
+    };
+
+
+    
 
 }
