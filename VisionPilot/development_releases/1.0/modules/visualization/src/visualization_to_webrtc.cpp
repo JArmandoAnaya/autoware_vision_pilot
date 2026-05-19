@@ -829,4 +829,72 @@ namespace visualization {
     };
 
 
-}
+    // WebRTCStreamer constructor and destructor and aux. funcs
+
+    WebRTCStreamer::WebRTCStreamer(Config config) : impl_(std::make_unique<Impl>(std::move(config))) {}
+
+    WebRTCStreamer::WebRTCStreamer() : WebRTCStreamer(Config()) {}
+
+    WebRTCStreamer::~WebRTCStreamer()
+    {
+        
+        stop();
+
+    }
+
+    bool WebRTCStreamer::start()
+    {
+        
+        return impl_ != nullptr && impl_->start();
+
+    }
+
+    void WebRTCStreamer::stop()
+    {
+        
+        if (impl_ != nullptr) {
+            impl_->stop();
+        }
+
+    };
+
+    bool WebRTCStreamer::push_frame(
+        const cv::Mat & frame
+    ) {
+        
+        return impl_ != nullptr && impl_->push_frame(frame);
+
+    };
+
+    bool WebRTCStreamer::is_running() const
+    {
+        
+        return impl_ != nullptr && impl_->running.load(std::memory_order_acquire);
+
+    };
+
+    bool WebRTCStreamer::has_client() const
+    {
+        
+        return impl_ != nullptr && impl_->has_client();
+
+    };
+
+    std::string WebRTCStreamer::browser_url() const
+    {
+        
+        if (impl_ == nullptr) {
+            return {};
+        }
+
+        return (
+            std::string{"http://"} + \
+            impl_->config.host + ":" + \
+            std::to_string(impl_->config.port) + \
+            "/"
+        );
+
+    };
+
+
+}   // namespace visualization
