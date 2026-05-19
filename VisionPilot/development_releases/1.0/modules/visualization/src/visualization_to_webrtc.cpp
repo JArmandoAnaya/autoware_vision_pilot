@@ -24,128 +24,70 @@ namespace visualization {
 
         constexpr const char kBrowserHtml[] = R"HTML(
             <!doctype html>
-            <html lang="en">
-            <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>VisionPilot WebRTC Streaming</title>
-            <style>
-                :root { color-scheme: dark; }
-                html, body { margin: 0; height: 100%; background: #000; color: #fff; font-family: system-ui, sans-serif; }
-                body { display: grid; place-items: center; }
-                .shell { width: min(1100px, calc(100vw - 32px)); display: grid; gap: 16px; }
-                .panel { background: rgba(12, 20, 35, 0.82); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
-                header { padding: 18px 20px; display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
-                h1 { font-size: 18px; margin: 0; letter-spacing: 0.03em; }
-                #status { font-size: 13px; color: #8fb5ff; }
-                video { width: 100%; max-height: calc(100vh - 220px); background: #000; display: block; }
-                .hint { padding: 14px 20px 18px; font-size: 14px; line-height: 1.45; color: #c6d1e6; }
-            </style>
-            </head>
-            <body>
-            <div class="shell">
-                <div class="panel">
-                <header>
-                    <h1>VisionPilot WebRTC Demo</h1>
-                    <div id="status">Connecting...</div>
-                </header>
-                <video id="video" autoplay playsinline muted></video>
-                <div class="hint">Open this page in a browser, keep the demo running, and the stream will appear here once the WebRTC negotiation completes.</div>
-                </div>
-            </div>
-            <script>
-                const statusNode = document.getElementById('status');
-                const videoNode = document.getElementById('video');
-                const pendingRemoteCandidates = [];
-                let peerConnection = null;
-                let websocket = null;
-                function setStatus(text) {
-                statusNode.textContent = text;
-                }
-                function sendSignal(payload) {
-                if (websocket && websocket.readyState === WebSocket.OPEN) {
-                    websocket.send(JSON.stringify(payload));
-                }
-                }
-                function ensurePeerConnection() {
-                if (peerConnection) {
-                    return peerConnection;
-                }
-                peerConnection = new RTCPeerConnection({ iceServers: [] });
-                peerConnection.ontrack = (event) => {
-                    if (videoNode.srcObject !== event.streams[0]) {
-                    videoNode.srcObject = event.streams[0];
-                    }
-                };
-                peerConnection.onicecandidate = (event) => {
-                    if (!event.candidate) {
-                    return;
-                    }
-                    sendSignal({
-                    type: 'candidate',
-                    candidate: event.candidate.candidate,
-                    sdpMLineIndex: event.candidate.sdpMLineIndex,
-                    });
-                };
-                return peerConnection;
-                }
-                async function drainPendingCandidates() {
-                if (!peerConnection || !peerConnection.remoteDescription) {
-                    return;
-                }
-                while (pendingRemoteCandidates.length > 0) {
-                    const candidate = pendingRemoteCandidates.shift();
-                    await peerConnection.addIceCandidate(candidate);
-                }
-                }
-                async function handleOffer(payload) {
-                const pc = ensurePeerConnection();
-                await pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
-                await drainPendingCandidates();
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                sendSignal({ type: 'answer', sdp: pc.localDescription.sdp });
-                setStatus('Connected');
-                }
-                function handleCandidate(payload) {
-                const candidate = {
-                    candidate: payload.candidate,
-                    sdpMLineIndex: payload.sdpMLineIndex,
-                };
-                if (!peerConnection || !peerConnection.remoteDescription) {
-                    pendingRemoteCandidates.push(candidate);
-                    return;
-                }
-                peerConnection.addIceCandidate(candidate).catch((error) => {
-                    console.error('Failed to add remote candidate', error);
-                });
-                }
-                function connectWebSocket() {
-                const scheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-                websocket = new WebSocket(`${scheme}${window.location.host}/ws`);
-                websocket.onopen = () => setStatus('Negotiating...');
-                websocket.onclose = () => setStatus('Disconnected');
-                websocket.onerror = () => setStatus('WebSocket error');
-                websocket.onmessage = async (event) => {
-                    const payload = JSON.parse(event.data);
-                    if (payload.type === 'offer') {
-                    try {
-                        await handleOffer(payload);
-                    } catch (error) {
-                        console.error(error);
-                        setStatus('Negotiation failed');
-                    }
-                    return;
-                    }
-                    if (payload.type === 'candidate') {
-                    handleCandidate(payload);
-                    }
-                };
-                }
-                connectWebSocket();
-            </script>
-            </body>
-            </html>
+                <html>
+                    <head>
+                        <meta charset="utf-8">
+                        <meta name="viewport" content="width=device-width,initial-scale=1">
+                        <title>VisionPilot</title>
+                        <style>
+                            html,body{
+                                height:100%;
+                                margin:0;
+                                background:#000
+                            }
+                            video{
+                                width:100%;
+                                height:100%;
+                                object-fit:contain;
+                                background:#000;
+                                display:block
+                            }
+                        </style>
+                    </head>
+                    <body>
+                        <video id="video" autoplay playsinline></video>
+                        <script>
+                            const video=document.getElementById('video');
+                            const pc=new RTCPeerConnection();
+                            pc.ontrack=e=>{video.srcObject=e.streams[0]};
+                            pc.onicecandidate=e=>{
+                                if(e.candidate)ws&&ws.readyState===WebSocket.OPEN&&ws.send(
+                                    JSON.stringify({
+                                        type:'candidate',
+                                        candidate:e.candidate.candidate,
+                                        sdpMLineIndex:e.candidate.sdpMLineIndex
+                                    })
+                                )
+                            };
+                            const scheme=location.protocol==='https:'?'wss://':'ws://';
+                            const ws=new WebSocket(scheme+location.host+'/'+'ws');
+                            ws.onmessage=async ev=>{
+                                const p=JSON.parse(ev.data);
+                                if(p.type==='offer'){
+                                    await pc.setRemoteDescription({
+                                        type:'offer',
+                                        sdp:p.sdp
+                                    });
+                                    const a=await pc.createAnswer();
+                                    await pc.setLocalDescription(a);
+                                    ws.send(JSON.stringify({
+                                        type:'answer',
+                                        sdp:pc.localDescription.sdp
+                                    }));
+                                } else if(p.type==='candidate') {
+                                    try {
+                                        await pc.addIceCandidate({
+                                            candidate:p.candidate,
+                                            sdpMLineIndex:p.sdpMLineIndex
+                                        });
+                                    } catch(e) {
+                                        console.error('Error adding ICE candidate:', e);
+                                    }
+                                }
+                            };
+                        </script>
+                    </body>
+                </html>
         )HTML";
 
 
