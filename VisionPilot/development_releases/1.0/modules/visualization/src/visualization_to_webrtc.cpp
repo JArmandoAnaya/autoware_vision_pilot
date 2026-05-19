@@ -627,6 +627,96 @@ namespace visualization {
     };
 
 
-    
+    // Pushes frame to GStreamer pipeline for encoding and streaming via WebRTC
+    // Also handles format conversion and timestamping
+    bool WebRTCStreamer::Impl::push_frame(
+        const cv::Mat & frame
+    ) {
+
+        // Validate state and input frame before processing
+        if (
+            (!running.load(std::memory_order_acquire)) || 
+            (appsrc == nullptr) || 
+            (frame.empty())
+        ) {
+            return false;
+        }
+
+        // Ensure frame is in BGR format for WebRTC streaming
+        cv::Mat bgr_frame = ensure_bgr_frame(frame);
+        if (bgr_frame.empty()) {
+            return false;
+        }
+
+        // Configure caps on appsrc if not already configured or if frame size changes
+        if (
+            (!caps_configured) || 
+            (bgr_frame.cols != configured_width) || 
+            (bgr_frame.rows != configured_height)
+        ) {
+            GstCaps *caps = gst_caps_new_simple(
+                "video/x-raw",
+                "format", G_TYPE_STRING, "BGR",
+                "width", G_TYPE_INT, bgr_frame.cols,
+                "height", G_TYPE_INT, bgr_frame.rows,
+                nullptr
+            );
+
+            if (config.frame_rate > 0.0) {
+                const int fps_numerator = std::max(1, static_cast<int>(std::lround(config.frame_rate)));
+                gst_caps_set_simple(
+                    caps, 
+                    "framerate", 
+                    GST_TYPE_FRACTION, 
+                    fps_numerator, 
+                    1, 
+                    nullptr
+                );
+            }
+
+            gst_app_src_set_caps(GST_APP_SRC(appsrc), caps);
+            gst_caps_unref(caps);
+
+            caps_configured = true;
+            configured_width = bgr_frame.cols;
+            configured_height = bgr_frame.rows;
+        }
+
+        // Create new GstBuffer and copy frame data into it
+        const std::size_t payload_size = static_cast<std::size_t>(bgr_frame.total() * bgr_frame.elemSize());
+        GstBuffer *buffer = gst_buffer_new_allocate(nullptr, payload_size, nullptr);
+        if (buffer == nullptr) {
+            return false;
+        }
+
+        GstMapInfo map;
+        if (!gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
+            gst_buffer_unref(buffer);
+            return false;
+        }
+
+        std::memcpy(
+            map.data, 
+            bgr_frame.data, 
+            payload_size
+        );
+        gst_buffer_unmap(buffer, &map);
+
+        // Set PTS, DTS, and duration on buffer based on config frame rate
+        const guint64 duration_ns = config.frame_rate > 0.0
+            ? static_cast<guint64>(GST_SECOND / config.frame_rate)
+            : GST_CLOCK_TIME_NONE;
+        const guint64 pts_ns = (
+            duration_ns == GST_CLOCK_TIME_NONE ? 
+            0 : 
+            frame_index.fetch_add(1, std::memory_order_acq_rel) * duration_ns
+        );
+        GST_BUFFER_PTS(buffer) = pts_ns;
+        GST_BUFFER_DTS(buffer) = pts_ns;
+        GST_BUFFER_DURATION(buffer) = duration_ns;
+
+        return (gst_app_src_push_buffer(GST_APP_SRC(appsrc), buffer) == GST_FLOW_OK);
+
+    };
 
 }
