@@ -16,7 +16,9 @@
 
 #include <opencv2/opencv.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <future>
@@ -88,6 +90,9 @@ struct FrameOutputs {
     FrameLatency           latency;
 };
 
+
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // InferencePipeline
 // ─────────────────────────────────────────────────────────────────────────────
@@ -104,6 +109,7 @@ public:
     {
         vf::LongitudinalFusion::Config fc;
         fc.homography_path = cfg.homography_path;
+        fc.debug           = cfg.fusion_debug;
         fusion_ = vf::LongitudinalFusion{fc};
     }
 
@@ -152,7 +158,7 @@ public:
         const double ms_wall = Ms(Clock::now() - t_wall).count();
 
         // ── Fusion: ObjectFinder + particle filter ────────────────────────────
-        const auto cipo = fusion_.update(res_drive, res_speed, original);
+        const auto cipo = fusion_.update(res_drive, res_speed, preprocessed);
 
         FrameOutputs out;
         out.auto_drive = res_drive;
@@ -214,9 +220,24 @@ private:
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-static cv::Mat preprocess(const cv::Mat& raw) {
+// Same as center_crop_50deg_resize_with_metadata() in zod_manual_ground_homography.py
+static cv::Mat preprocess(const cv::Mat& raw, float hfov_deg) {
+    static constexpr float TARGET_FOV_DEG = 50.f;
+
+    const int img_w = raw.cols;
+    const int img_h = raw.rows;
+    int crop_w = static_cast<int>(std::lround(img_w * TARGET_FOV_DEG / hfov_deg));
+    int crop_h = crop_w / 2;  // 2:1 aspect, integer division like Python //
+    crop_w = std::clamp(crop_w, 1, img_w);
+    crop_h = std::clamp(crop_h, 1, img_h);
+
+    const int crop_x = (img_w - crop_w) / 2;
+    const int crop_y = (img_h - crop_h) / 2;
+    const cv::Rect roi(crop_x, crop_y, crop_w, crop_h);
+
     cv::Mat out;
-    cv::resize(raw, out, cv::Size(InferencePipeline::NET_W, InferencePipeline::NET_H));
+    cv::resize(raw(roi), out, cv::Size(InferencePipeline::NET_W, InferencePipeline::NET_H),
+               0, 0, cv::INTER_LINEAR);
     return out;
 }
 
@@ -225,29 +246,43 @@ static std::string fmtd(double v, int d = 1) {
 }
 
 static std::vector<std::string> build_overlay(const FrameOutputs& r, const std::string& src) {
+    static constexpr float D_MAX = 150.f;  // AutoDrive model range
     const auto& lt = r.latency;
     std::vector<std::string> L;
-    L.push_back(src + "  #" + std::to_string(r.frame_id));
-    if (r.auto_drive.valid)
-        L.push_back("AutoDrive  d=" + fmtd(r.auto_drive.dist_normalized, 3)
+
+    L.push_back(src + "  #" + std::to_string(r.frame_id)
+                + "  wall=" + fmtd(lt.pipeline_ms) + " ms"
+                + "  (" + fmtd(1000.0/lt.pipeline_ms, 0) + " fps)");
+
+    // ── Per-model outputs ────────────────────────────────────────────────────
+    if (r.auto_drive.valid) {
+        const float d_m = D_MAX * (1.f - r.auto_drive.dist_normalized);
+        L.push_back("AutoDrive   d=" + fmtd(d_m, 1) + " m [raw]"
                     + "  curv=" + fmtd(r.auto_drive.curvature_raw, 4)
                     + "  [" + fmtd(lt.autodrive_ms) + " ms]");
+    }
     if (r.auto_steer.valid)
-        L.push_back("AutoSteer  xp=" + fmtd(r.auto_steer.xp[0], 3)
+        L.push_back("AutoSteer   xp=" + fmtd(r.auto_steer.xp[0], 3)
                     + "  [" + fmtd(lt.autosteer_ms) + " ms]");
     if (r.auto_speed.valid)
-        L.push_back("AutoSpeed  dets=" + std::to_string(r.auto_speed.detections.size())
+        L.push_back("AutoSpeed   dets=" + std::to_string(r.auto_speed.detections.size())
                     + "  [" + fmtd(lt.autospeed_ms) + " ms]");
+
+    // ── Tracker raw estimate (ObjectFinder + Kalman) ─────────────────────────
     if (r.cipo.tracker_found)
-        L.push_back("Tracker  id=" + std::to_string(r.cipo.tracker_id)
-                    + "  d=" + fmtd(r.cipo.tracker_dist_m) + " m"
+        L.push_back("Tracker     d=" + fmtd(r.cipo.tracker_dist_m, 1) + " m [raw]"
                     + "  v=" + fmtd(r.cipo.tracker_vel_ms, 2) + " m/s"
+                    + "  id=" + std::to_string(r.cipo.tracker_id)
                     + (r.cipo.cut_in_detected ? "  [CUT-IN]" : ""));
+    else
+        L.push_back("Tracker     (no CIPO)");
+
+    // ── Particle-filter fused estimate ───────────────────────────────────────
     if (r.cipo.valid)
-        L.push_back("Fused  d=" + fmtd(r.cipo.distance_m) + " m"
+        L.push_back("Fused       d=" + fmtd(r.cipo.distance_m, 1) + " m"
                     + "  v=" + fmtd(r.cipo.velocity_ms, 2) + " m/s"
-                    + "  ±" + fmtd(r.cipo.distance_stddev_m) + " m"
-                    + "  [wall=" + fmtd(lt.pipeline_ms) + " ms]");
+                    + "  ±" + fmtd(r.cipo.distance_stddev_m, 1) + " m");
+
     return L;
 }
 
@@ -261,26 +296,28 @@ static int run_video(InferencePipeline& pipeline, const VisionPilotConfig& cfg,
     cv::VideoCapture cap(path);
     if (!cap.isOpened()) { VP_ERROR("Cannot open video: %s", path.c_str()); return 1; }
 
-    VP_INFO("Video: %s  %.0f fps  %dx%d  realtime=%s  loop=%s",
+    VP_INFO("Video: %s  %.0f fps  %dx%d  crop_hfov=%.0f→50  realtime=%s  loop=%s",
             path.c_str(),
             cap.get(cv::CAP_PROP_FPS),
             static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH)),
             static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT)),
+            cfg.source.hfov_deg,
             cfg.source.video_realtime ? "yes" : "no",
             cfg.source.video_loop     ? "yes" : "no");
 
     // GPU warmup — discard initial frames to let CUDA compile kernels
     VP_INFO("GPU warmup...");
     { cv::Mat f;
-      for (int i = 0; i < 4 && cap.read(f); ++i) pipeline.process(preprocess(f), f);
+      for (int i = 0; i < 4 && cap.read(f); ++i)
+          pipeline.process(preprocess(f, cfg.source.hfov_deg), f);
       cap.set(cv::CAP_PROP_POS_FRAMES, 0); pipeline.reset(); }
 
     // Optional initial inference check
     if (cfg.pipeline.initial_inference_check) {
         cv::Mat f1, f2;
         if (cap.read(f1) && cap.read(f2)) {
-            pipeline.process(preprocess(f1), f1);
-            if (const auto r = pipeline.process(preprocess(f2), f2); r)
+            pipeline.process(preprocess(f1, cfg.source.hfov_deg), f1);
+            if (const auto r = pipeline.process(preprocess(f2, cfg.source.hfov_deg), f2); r)
                 VP_INFO("Initial check OK — d=%.1f m  v=%.2f m/s  wall=%.1f ms",
                         r->cipo.distance_m, r->cipo.velocity_ms, r->latency.pipeline_ms);
         }
@@ -300,7 +337,7 @@ static int run_video(InferencePipeline& pipeline, const VisionPilotConfig& cfg,
             break;
         }
 
-        const auto result = pipeline.process(preprocess(frame), frame);
+        const auto result = pipeline.process(preprocess(frame, cfg.source.hfov_deg), frame);
 
         if (result && result->frame_id % 30 == 0) pipeline.latency().print();
 
@@ -327,7 +364,7 @@ static void run_ros2(InferencePipeline& pipeline, const VisionPilotConfig& cfg,
         auto [ok, frame] = sub.get_latest_frame();
         if (!ok || frame.empty()) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
 
-        const auto result = pipeline.process(preprocess(frame), frame);
+        const auto result = pipeline.process(preprocess(frame, cfg.source.hfov_deg), frame);
         if (!result) continue;
 
         if (result->frame_id % 30 == 0) pipeline.latency().print();
@@ -347,7 +384,7 @@ static void run_v4l2(InferencePipeline& pipeline, const VisionPilotConfig& cfg,
         auto [ok, frame] = reader.get_latest_frame();
         if (!ok || frame.empty()) continue;
 
-        const auto result = pipeline.process(preprocess(frame), frame);
+        const auto result = pipeline.process(preprocess(frame, cfg.source.hfov_deg), frame);
         if (!result) continue;
 
         if (result->frame_id % 30 == 0) pipeline.latency().print();
@@ -379,6 +416,7 @@ int main(int argc, char** argv)
     VP_INFO("AutoSpeed : %s", cfg.autospeed_model.c_str());
     VP_INFO("Provider  : %s", cfg.engine_cfg.provider.c_str());
     VP_INFO("Homography: %s", cfg.homography_path.empty() ? "(none — tracker disabled)" : cfg.homography_path.c_str());
+    VP_INFO("FusionDbg : %s", cfg.fusion_debug ? "on" : "off");
 
     ve::OnnxEngine     engine(cfg.engine_cfg);
     InferencePipeline  pipeline(engine, cfg);
