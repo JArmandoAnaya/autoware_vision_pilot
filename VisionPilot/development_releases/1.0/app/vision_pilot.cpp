@@ -1,4 +1,8 @@
-#include "vision_pilot_config.hpp"
+// ─────────────────────────────────────────────────────────────────────────────
+// VisionPilot — main application
+// ─────────────────────────────────────────────────────────────────────────────
+#include <config/vision_pilot_config.hpp>
+#include <logging/logger.hpp>
 
 #include <camera_subscriber/ros2_to_opencv.hpp>
 #include <v4l2_interface/v4l2_reader.hpp>
@@ -12,703 +16,384 @@
 
 #include <opencv2/opencv.hpp>
 
-#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstring>
 #include <future>
-#include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
 #include <vector>
 
-namespace {
+namespace vm = visionpilot::models;
+namespace vf = visionpilot::fusion;
+namespace ve = visionpilot::engine;
 
-// First argv token that is not a config flag (expected: capture mode 0 or 1).
-int index_of_mode_arg(int argc, char** argv)
-{
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        if (arg == "--config" || arg == "-c") {
-            ++i;
-            continue;
-        }
-        if (arg.rfind("--config=", 0) == 0) {
-            continue;
-        }
-        return i;
+// ─────────────────────────────────────────────────────────────────────────────
+// Circular frame buffer — holds the last N BGR frames for AutoDrive
+// ─────────────────────────────────────────────────────────────────────────────
+template<int N>
+class CircularFrameBuffer {
+public:
+    void push(const cv::Mat& f) {
+        buf_[head_] = f.clone();
+        head_       = (head_ + 1) % N;
+        count_      = std::min(count_ + 1, N);
     }
-    return -1;
-}
-
-}  // namespace
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Latency
-// ─────────────────────────────────────────────────────────────────────────────
-
-using Clock    = std::chrono::steady_clock;
-using Ms       = std::chrono::duration<double, std::milli>;
-
-struct FrameLatency {
-    double preprocess_ms  = 0.0;  // CHW conversion before launch
-    double autodrive_ms   = 0.0;  // AutoDrive wall time (inside thread)
-    double autosteer_ms   = 0.0;
-    double autospeed_ms   = 0.0;
-    double pipeline_ms    = 0.0;  // wall time from dispatch to last .get()
+    // [0] = most recent, [1] = previous, …
+    const cv::Mat& operator[](int i) const { return buf_[(head_ - 1 - i + N * 2) % N]; }
+    bool ready() const { return count_ >= N; }
+    void clear()       { count_ = 0; head_ = 0; }
+private:
+    std::array<cv::Mat, N> buf_;
+    int head_ = 0, count_ = 0;
 };
 
-// Rolling stats (exponential moving average, α = 0.1)
+// ─────────────────────────────────────────────────────────────────────────────
+// Latency tracking (EMA smoothing)
+// ─────────────────────────────────────────────────────────────────────────────
+struct FrameLatency {
+    double preprocess_ms = 0, autodrive_ms = 0, autosteer_ms = 0,
+           autospeed_ms  = 0, pipeline_ms  = 0;
+};
+
 struct LatencyStats {
-    double ema_preprocess  = 0.0;
-    double ema_autodrive   = 0.0;
-    double ema_autosteer   = 0.0;
-    double ema_autospeed   = 0.0;
-    double ema_pipeline    = 0.0;
-    uint64_t n = 0;
+    double pre{0}, ad{0}, as{0}, asp{0}, wall{0};
+    bool   ok{false};
 
-    static constexpr double ALPHA = 0.1;
-
-    void update(const FrameLatency& f)
-    {
-        if (n == 0) {
-            ema_preprocess = f.preprocess_ms;
-            ema_autodrive  = f.autodrive_ms;
-            ema_autosteer  = f.autosteer_ms;
-            ema_autospeed  = f.autospeed_ms;
-            ema_pipeline   = f.pipeline_ms;
-        } else {
-            ema_preprocess = ALPHA * f.preprocess_ms + (1.0 - ALPHA) * ema_preprocess;
-            ema_autodrive  = ALPHA * f.autodrive_ms  + (1.0 - ALPHA) * ema_autodrive;
-            ema_autosteer  = ALPHA * f.autosteer_ms  + (1.0 - ALPHA) * ema_autosteer;
-            ema_autospeed  = ALPHA * f.autospeed_ms  + (1.0 - ALPHA) * ema_autospeed;
-            ema_pipeline   = ALPHA * f.pipeline_ms   + (1.0 - ALPHA) * ema_pipeline;
-        }
-        ++n;
+    void update(const FrameLatency& lt) {
+        auto ema = [this](double& e, double v){ e = ok ? e*0.9+v*0.1 : v; };
+        ema(pre, lt.preprocess_ms); ema(ad, lt.autodrive_ms);
+        ema(as,  lt.autosteer_ms);  ema(asp, lt.autospeed_ms);
+        ema(wall, lt.pipeline_ms);  ok = true;
     }
-
-    void print() const
-    {
-        // pipeline_ms = wall clock while all three models run in parallel
-        // (≈ max(drive, steer, speed), not their sum)
-        const double parallel_max = std::max({ema_autodrive, ema_autosteer, ema_autospeed});
-        printf("[Latency EMA] preprocess=%.2f ms | "
-               "drive=%.2f  steer=%.2f  speed=%.2f ms (parallel) | "
-               "wall=%.2f ms  max_model=%.2f ms  (%.1f fps)\n",
-               ema_preprocess,
-               ema_autodrive, ema_autosteer, ema_autospeed,
-               ema_pipeline, parallel_max,
-               ema_pipeline > 0.0 ? 1000.0 / ema_pipeline : 0.0);
+    void print() const {
+        if (!ok) return;
+        VP_INFO("Latency[EMA]  pre=%.1f  AD=%.1f  AS=%.1f  ASp=%.1f  wall=%.1f ms  (%.0f fps)",
+                pre, ad, as, asp, wall, 1000.0/wall);
     }
-
     void reset() { *this = {}; }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Per-frame result bundle
+// Per-frame outputs
 // ─────────────────────────────────────────────────────────────────────────────
-
 struct FrameOutputs {
-    visionpilot::models::AutoDriveOutput  auto_drive;
-    visionpilot::models::AutoSteerOutput  auto_steer;
-    visionpilot::models::AutoSpeedOutput  auto_speed;
-    visionpilot::fusion::CIPOFusionEstimate cipo_fusion;  // particle-filter fused CIPO estimate
-    uint64_t     frame_id = 0;
-    FrameLatency latency;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CircularFrameBuffer<N>
-//
-// Fixed-capacity ring of cv::Mat frames.  push() overwrites the oldest slot.
-// ready() returns true once at least N frames have been pushed.
-// operator[](0) = most recent, operator[](1) = one before, etc.
-// ─────────────────────────────────────────────────────────────────────────────
-
-template<int N>
-class CircularFrameBuffer {
-public:
-    void push(const cv::Mat& frame)
-    {
-        head_ = (head_ + N - 1) % N;   // move head backwards (newest slot)
-        slots_[head_] = frame.clone();
-        if (count_ < N) ++count_;
-    }
-
-    bool ready() const { return count_ >= N; }
-
-    // [0] = newest, [1] = previous, ...
-    const cv::Mat& operator[](int age) const
-    {
-        return slots_[(head_ + age) % N];
-    }
-
-    void clear()
-    {
-        for (auto& s : slots_) s.release();
-        head_  = 0;
-        count_ = 0;
-    }
-
-private:
-    std::array<cv::Mat, N> slots_;
-    int head_  = 0;
-    int count_ = 0;
+    vm::AutoDriveOutput    auto_drive;
+    vm::AutoSteerOutput    auto_steer;
+    vm::AutoSpeedOutput    auto_speed;
+    vf::CIPOFusionEstimate cipo;    // tracker + particle-filter fused estimate
+    uint64_t               frame_id = 0;
+    FrameLatency           latency;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // InferencePipeline
-//
-// Owns the 2-slot circular frame buffer and the three model instances.
-// Caller is responsible for spatial pre-processing (warp/crop/resize to
-// NET_W × NET_H) before calling process().  Normalization to CHW float32
-// is done here, once per normalization variant, before any threads start.
-//
-// Parallelism:
-//   All three models run concurrently via std::async.
-//   process() blocks until the slowest model finishes:
-//     wall-time ≈ max(T_autodrive, T_autosteer, T_autospeed)
-//
-// Thread safety:
-//   process() is NOT thread-safe; call from a single capture/inference thread.
 // ─────────────────────────────────────────────────────────────────────────────
-
 class InferencePipeline {
 public:
-    static constexpr int NET_H    = 512;
-    static constexpr int NET_W    = 1024;
-    static constexpr int CHW_SIZE = 3 * NET_H * NET_W;  // 1 572 864 floats
+    static constexpr int NET_W    = vm::AutoDrive::NET_W;
+    static constexpr int NET_H    = vm::AutoDrive::NET_H;
+    static constexpr int CHW_SIZE = 3 * NET_W * NET_H;
 
-    InferencePipeline(visionpilot::engine::OnnxEngine& ort_engine, const VisionPilotConfig& cfg)
-        : auto_drive_(ort_engine, cfg.autodrive_model)
-        , auto_steer_(ort_engine, cfg.autosteer_model)
-        , auto_speed_(ort_engine, cfg.autospeed_model)
-    {}
-
-    // Push a pre-processed BGR frame (must already be NET_W × NET_H).
-    // Returns nullopt on the very first call — AutoDrive needs prev + curr.
-    // record_latency=false for GPU warmup passes (not counted in EMA).
-    std::optional<FrameOutputs> process(const cv::Mat& frame_bgr, bool record_latency = true)
+    InferencePipeline(ve::OnnxEngine& engine, const VisionPilotConfig& cfg)
+        : auto_drive_(engine, cfg.autodrive_model)
+        , auto_steer_(engine, cfg.autosteer_model)
+        , auto_speed_(engine, cfg.autospeed_model)
     {
-        // ── 1. Push into circular buffer ─────────────────────────────────
-        frames_.push(frame_bgr);
+        vf::LongitudinalFusion::Config fc;
+        fc.homography_path = cfg.homography_path;
+        fusion_ = vf::LongitudinalFusion{fc};
+    }
+
+    // preprocessed : NET_W × NET_H BGR for model inference
+    // original     : native-resolution frame for ObjectFinder / homography
+    std::optional<FrameOutputs> process(const cv::Mat& preprocessed,
+                                         const cv::Mat& original)
+    {
+        using Clock = std::chrono::steady_clock;
+        using Ms    = std::chrono::duration<double, std::milli>;
+
+        frames_.push(preprocessed);
         ++frame_count_;
+        if (!frames_.ready()) return std::nullopt;  // AutoDrive needs 2 frames
 
-        if (!frames_.ready()) {
-            return std::nullopt;  // need at least 2 frames for AutoDrive
-        }
+        // ── Build CHW float buffers ───────────────────────────────────────────
+        auto t0 = Clock::now();
+        auto prev_imn = chw_imagenet(frames_[1]);
+        auto curr_imn = chw_imagenet(frames_[0]);
+        auto curr_01  = chw_01(frames_[0]);
+        const double ms_pre = Ms(Clock::now() - t0).count();
 
-        // frames_[0] = current, frames_[1] = previous
-
-        // ── 2. Build CHW tensors ──────────────────────────────────────────
-        auto t_pre_start = Clock::now();
-        std::vector<float> prev_imagenet = to_chw_imagenet(frames_[1]);
-        std::vector<float> curr_imagenet = to_chw_imagenet(frames_[0]);
-        std::vector<float> curr_01       = to_chw_01(frames_[0]);
-        const double preprocess_ms = Ms(Clock::now() - t_pre_start).count();
-
-        // ── 3. Launch all three inferences concurrently ──────────────────
-        auto t_dispatch = Clock::now();
+        // ── Parallel inference ────────────────────────────────────────────────
+        auto t_wall = Clock::now();
 
         auto f_drive = std::async(std::launch::async, [&] {
-            auto t0 = Clock::now();
-            auto result = auto_drive_.infer(prev_imagenet.data(), curr_imagenet.data());
-            return std::make_pair(result, Ms(Clock::now() - t0).count());
+            auto t = Clock::now();
+            return std::make_pair(auto_drive_.infer(prev_imn.data(), curr_imn.data()),
+                                  Ms(Clock::now() - t).count());
         });
-
         auto f_steer = std::async(std::launch::async, [&] {
-            auto t0 = Clock::now();
-            auto result = auto_steer_.infer(curr_01.data());
-            return std::make_pair(result, Ms(Clock::now() - t0).count());
+            auto t = Clock::now();
+            return std::make_pair(auto_steer_.infer(curr_01.data()),
+                                  Ms(Clock::now() - t).count());
         });
-
         auto f_speed = std::async(std::launch::async, [&] {
-            auto t0 = Clock::now();
-            auto result = auto_speed_.infer(curr_01.data());
-            return std::make_pair(result, Ms(Clock::now() - t0).count());
+            auto t = Clock::now();
+            return std::make_pair(auto_speed_.infer(curr_01.data()),
+                                  Ms(Clock::now() - t).count());
         });
 
-        // ── 4. Barrier — wall time = max(T_drive, T_steer, T_speed) ──────
+        // ── Barrier ───────────────────────────────────────────────────────────
         auto [res_drive, ms_drive] = f_drive.get();
         auto [res_steer, ms_steer] = f_steer.get();
         auto [res_speed, ms_speed] = f_speed.get();
-        const double pipeline_ms = Ms(Clock::now() - t_dispatch).count();
+        const double ms_wall = Ms(Clock::now() - t_wall).count();
 
-        // ── 5. Longitudinal fusion (particle filter) ──────────────────
-        // Converts AutoDrive dist_normalized → metres using the model's stated D_MAX.
-        // Tracker input is left invalid until ObjectFinder is ported to 1.0.
-        static constexpr float D_MAX_M = 150.f;
-
-        visionpilot::fusion::DistanceMeasurement ad_meas;
-        ad_meas.distance_m = D_MAX_M * (1.f - res_drive.dist_normalized);
-        ad_meas.stddev_m   = longitudinal_fusion_.config().autodrive_noise_m;
-        ad_meas.valid      = res_drive.valid;
-
-        const auto cipo_est = longitudinal_fusion_.update(ad_meas);
+        // ── Fusion: ObjectFinder + particle filter ────────────────────────────
+        const auto cipo = fusion_.update(res_drive, res_speed, original);
 
         FrameOutputs out;
-        out.auto_drive   = res_drive;
-        out.auto_steer   = res_steer;
-        out.auto_speed   = res_speed;
-        out.cipo_fusion  = cipo_est;
-        out.frame_id     = frame_count_;
-        out.latency = { preprocess_ms, ms_drive, ms_steer, ms_speed, pipeline_ms };
-        if (record_latency) {
-            latency_stats_.update(out.latency);
-        }
-
+        out.auto_drive = res_drive;
+        out.auto_steer = res_steer;
+        out.auto_speed = res_speed;
+        out.cipo       = cipo;
+        out.frame_id   = frame_count_;
+        out.latency    = {ms_pre, ms_drive, ms_steer, ms_speed, ms_wall};
+        stats_.update(out.latency);
         return out;
     }
 
-    void reset()
-    {
+    void reset() {
         frames_.clear();
-        frame_count_  = 0;
-        latency_stats_.reset();
-        longitudinal_fusion_.reset();
+        frame_count_ = 0;
+        stats_.reset();
+        fusion_.reset();
     }
 
-    const LatencyStats& latency_stats() const { return latency_stats_; }
+    const LatencyStats& latency() const { return stats_; }
 
 private:
-    // ── Normalization helpers ─────────────────────────────────────────────
-
     static constexpr float MEAN[3] = {0.485f, 0.456f, 0.406f};
     static constexpr float STD[3]  = {0.229f, 0.224f, 0.225f};
 
-    // BGR → RGB → float32 → ImageNet normalise → CHW
-    static std::vector<float> to_chw_imagenet(const cv::Mat& bgr)
-    {
-        cv::Mat rgb;
-        cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
-
-        cv::Mat f32;
-        rgb.convertTo(f32, CV_32FC3, 1.0 / 255.0);
-
-        std::vector<cv::Mat> ch(3);
-        cv::split(f32, ch);
-
-        std::vector<float> out(CHW_SIZE);
-        for (int c = 0; c < 3; ++c) {
-            float*       dst = out.data() + c * NET_H * NET_W;
-            const float* src = reinterpret_cast<const float*>(ch[c].data);
-            for (int i = 0; i < NET_H * NET_W; ++i)
-                dst[i] = (src[i] - MEAN[c]) / STD[c];
-        }
-        return out;
-    }
-
-    // BGR → RGB → float32 [0, 1] → CHW
-    static std::vector<float> to_chw_01(const cv::Mat& bgr)
-    {
-        cv::Mat rgb;
-        cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
-
-        cv::Mat f32;
-        rgb.convertTo(f32, CV_32FC3, 1.0 / 255.0);
-
-        std::vector<cv::Mat> ch(3);
-        cv::split(f32, ch);
-
-        std::vector<float> out(CHW_SIZE);
+    static std::vector<float> chw_imagenet(const cv::Mat& bgr) {
+        cv::Mat rgb; cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+        cv::Mat f32; rgb.convertTo(f32, CV_32FC3, 1.0/255.0);
+        std::vector<cv::Mat> ch(3); cv::split(f32, ch);
+        std::vector<float> out(static_cast<std::size_t>(CHW_SIZE));
         for (int c = 0; c < 3; ++c) {
             float* dst = out.data() + c * NET_H * NET_W;
-            std::memcpy(dst, ch[c].data, NET_H * NET_W * sizeof(float));
+            const float* src = reinterpret_cast<const float*>(ch[c].data);
+            for (int i = 0; i < NET_H * NET_W; ++i) dst[i] = (src[i] - MEAN[c]) / STD[c];
         }
         return out;
     }
 
-    // ── State ─────────────────────────────────────────────────────────────
+    static std::vector<float> chw_01(const cv::Mat& bgr) {
+        cv::Mat rgb; cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+        cv::Mat f32; rgb.convertTo(f32, CV_32FC3, 1.0/255.0);
+        std::vector<cv::Mat> ch(3); cv::split(f32, ch);
+        std::vector<float> out(static_cast<std::size_t>(CHW_SIZE));
+        for (int c = 0; c < 3; ++c)
+            std::memcpy(out.data() + c * NET_H * NET_W, ch[c].data, static_cast<std::size_t>(NET_H * NET_W) * sizeof(float));
+        return out;
+    }
 
-    visionpilot::models::AutoDrive auto_drive_;
-    visionpilot::models::AutoSteer auto_steer_;
-    visionpilot::models::AutoSpeed auto_speed_;
-
-    visionpilot::fusion::LongitudinalFusion longitudinal_fusion_;  // CIPO particle filter
-
+    vm::AutoDrive  auto_drive_;
+    vm::AutoSteer  auto_steer_;
+    vm::AutoSpeed  auto_speed_;
+    vf::LongitudinalFusion fusion_;
     CircularFrameBuffer<2> frames_;
     uint64_t               frame_count_ = 0;
-    LatencyStats           latency_stats_;
+    LatencyStats           stats_;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Spatial pre-processing  (warp / crop / resize → NET_W × NET_H)
-//
-// In production this will apply the homography warp + 50° FOV crop.
-// For now: simple resize as a placeholder.
+// Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-static cv::Mat spatial_preprocess(const cv::Mat& raw)
-{
+static cv::Mat preprocess(const cv::Mat& raw) {
     cv::Mat out;
-    cv::resize(raw, out,
-               cv::Size(InferencePipeline::NET_W, InferencePipeline::NET_H),
-               0, 0, cv::INTER_LINEAR);
+    cv::resize(raw, out, cv::Size(InferencePipeline::NET_W, InferencePipeline::NET_H));
     return out;
 }
 
-static void print_latency_detail(const FrameLatency& lt, const char* label)
-{
-    const double parallel_max = std::max({lt.autodrive_ms, lt.autosteer_ms, lt.autospeed_ms});
-    printf("  %s latency (models run in parallel — wall ≈ max, not sum):\n", label);
-    printf("    preprocess=%.2f ms\n", lt.preprocess_ms);
-    printf("    autodrive=%.2f ms  autosteer=%.2f ms  autospeed=%.2f ms\n",
-           lt.autodrive_ms, lt.autosteer_ms, lt.autospeed_ms);
-    printf("    parallel wall=%.2f ms  max_model=%.2f ms  (%.1f fps)\n",
-           lt.pipeline_ms, parallel_max,
-           lt.pipeline_ms > 0.0 ? 1000.0 / lt.pipeline_ms : 0.0);
+static std::string fmtd(double v, int d = 1) {
+    char b[24]; std::snprintf(b, sizeof(b), "%.*f", d, v); return b;
 }
 
-static void print_inference_summary(const FrameOutputs& out)
-{
-    const auto& d  = out.auto_drive;
-    const auto& s  = out.auto_steer;
-    const auto& sp = out.auto_speed;
-
-    printf("[VisionPilot] Initial inference check (frame %llu, steady-state after GPU warmup)\n",
-           static_cast<unsigned long long>(out.frame_id));
-    printf("  AutoDrive  valid=%d  dist_norm=%.6f  curvature=%.6f  flag_prob=%.5f\n",
-           d.valid, d.dist_normalized, d.curvature_raw, d.flag_prob);
-    printf("  AutoSteer  valid=%d  xp[0]=%.6f  h_vector[0]=%.6f\n",
-           s.valid, s.xp[0], s.h_vector[0]);
-    printf("  AutoSpeed  valid=%d  detections=%zu\n",
-           sp.valid, sp.detections.size());
-    if (out.cipo_fusion.valid) {
-        printf("  CIPOFusion valid=1  dist=%.2f m  vel=%.2f m/s  "
-               "(stddev: d=%.2f m  v=%.2f m/s)\n",
-               out.cipo_fusion.distance_m, out.cipo_fusion.velocity_ms,
-               out.cipo_fusion.distance_stddev_m, out.cipo_fusion.velocity_stddev_ms);
-    }
-    print_latency_detail(out.latency, "Steady-state");
-
-    if (!d.valid || !s.valid || !sp.valid) {
-        std::cerr << "[VisionPilot] WARNING: one or more models returned invalid output\n";
-    }
+static std::vector<std::string> build_overlay(const FrameOutputs& r, const std::string& src) {
+    const auto& lt = r.latency;
+    std::vector<std::string> L;
+    L.push_back(src + "  #" + std::to_string(r.frame_id));
+    if (r.auto_drive.valid)
+        L.push_back("AutoDrive  d=" + fmtd(r.auto_drive.dist_normalized, 3)
+                    + "  curv=" + fmtd(r.auto_drive.curvature_raw, 4)
+                    + "  [" + fmtd(lt.autodrive_ms) + " ms]");
+    if (r.auto_steer.valid)
+        L.push_back("AutoSteer  xp=" + fmtd(r.auto_steer.xp[0], 3)
+                    + "  [" + fmtd(lt.autosteer_ms) + " ms]");
+    if (r.auto_speed.valid)
+        L.push_back("AutoSpeed  dets=" + std::to_string(r.auto_speed.detections.size())
+                    + "  [" + fmtd(lt.autospeed_ms) + " ms]");
+    if (r.cipo.tracker_found)
+        L.push_back("Tracker  id=" + std::to_string(r.cipo.tracker_id)
+                    + "  d=" + fmtd(r.cipo.tracker_dist_m) + " m"
+                    + "  v=" + fmtd(r.cipo.tracker_vel_ms, 2) + " m/s"
+                    + (r.cipo.cut_in_detected ? "  [CUT-IN]" : ""));
+    if (r.cipo.valid)
+        L.push_back("Fused  d=" + fmtd(r.cipo.distance_m) + " m"
+                    + "  v=" + fmtd(r.cipo.velocity_ms, 2) + " m/s"
+                    + "  ±" + fmtd(r.cipo.distance_stddev_m) + " m"
+                    + "  [wall=" + fmtd(lt.pipeline_ms) + " ms]");
+    return L;
 }
 
-// Discard N full inference cycles so CUDA kernels are compiled before we measure.
-static void gpu_warmup(InferencePipeline& pipeline, cv::VideoCapture& cap, int cycles)
+// ─────────────────────────────────────────────────────────────────────────────
+// Source mode runners
+// ─────────────────────────────────────────────────────────────────────────────
+
+static int run_video(InferencePipeline& pipeline, const VisionPilotConfig& cfg,
+                     const std::string& path)
 {
-    if (cycles <= 0) return;
+    cv::VideoCapture cap(path);
+    if (!cap.isOpened()) { VP_ERROR("Cannot open video: %s", path.c_str()); return 1; }
 
-    printf("[VisionPilot] GPU warmup: %d inference cycle(s) (not timed)\n", cycles);
-    cv::Mat frame;
-    for (int c = 0; c < cycles; ++c) {
-        if (!cap.read(frame) || frame.empty()) break;
-        pipeline.process(spatial_preprocess(frame), false);
-        if (!cap.read(frame) || frame.empty()) break;
-        pipeline.process(spatial_preprocess(frame), false);
-    }
-    cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-    pipeline.reset();
-}
+    VP_INFO("Video: %s  %.0f fps  %dx%d  realtime=%s  loop=%s",
+            path.c_str(),
+            cap.get(cv::CAP_PROP_FPS),
+            static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH)),
+            static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT)),
+            cfg.source.video_realtime ? "yes" : "no",
+            cfg.source.video_loop     ? "yes" : "no");
 
-// Warmup → measured inference → rewind video.
-static bool run_initial_inference_check(
-    InferencePipeline& pipeline, cv::VideoCapture& cap)
-{
-    // First CUDA runs are ~500 ms+ (kernel compile); discard before measuring.
-    gpu_warmup(pipeline, cap, 2);
+    // GPU warmup — discard initial frames to let CUDA compile kernels
+    VP_INFO("GPU warmup...");
+    { cv::Mat f;
+      for (int i = 0; i < 4 && cap.read(f); ++i) pipeline.process(preprocess(f), f);
+      cap.set(cv::CAP_PROP_POS_FRAMES, 0); pipeline.reset(); }
 
-    cv::Mat frame;
-    if (!cap.read(frame) || frame.empty()) {
-        std::cerr << "[VisionPilot] Initial check: cannot read first frame\n";
-        return false;
-    }
-    pipeline.process(spatial_preprocess(frame), false);
-
-    if (!cap.read(frame) || frame.empty()) {
-        std::cerr << "[VisionPilot] Initial check: cannot read second frame\n";
-        return false;
-    }
-    auto result = pipeline.process(spatial_preprocess(frame), true);
-    if (!result) {
-        std::cerr << "[VisionPilot] Initial check: inference returned no output\n";
-        return false;
-    }
-
-    print_inference_summary(*result);
-
-    cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-    pipeline.reset();
-    std::cout << "[VisionPilot] Initial check OK — restarting video from frame 0\n";
-    return true;
-}
-
-static std::string fmt(double v, int dec = 2)
-{
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.*f", dec, v);
-    return buf;
-}
-
-static std::vector<std::string> make_inference_overlay(
-    const FrameOutputs& result, const std::string& source_label)
-{
-    const auto& lt = result.latency;
-    std::vector<std::string> lines = {
-        source_label + "  #" + std::to_string(result.frame_id),
-    };
-    if (result.auto_drive.valid) {
-        lines.push_back(
-            "AutoDrive  dist=" + fmt(result.auto_drive.dist_normalized, 3) +
-            "  curv=" + fmt(result.auto_drive.curvature_raw, 5) +
-            "  flag=" + fmt(result.auto_drive.flag_prob, 3) +
-            "  [" + fmt(lt.autodrive_ms) + " ms]");
-    }
-    if (result.auto_steer.valid) {
-        lines.push_back(
-            "AutoSteer  xp[0]=" + fmt(result.auto_steer.xp[0], 4) +
-            "  [" + fmt(lt.autosteer_ms) + " ms]");
-    }
-    if (result.auto_speed.valid) {
-        lines.push_back(
-            "AutoSpeed  dets=" + std::to_string(result.auto_speed.detections.size()) +
-            "  [" + fmt(lt.autospeed_ms) + " ms]");
-    }
-    if (result.cipo_fusion.valid) {
-        lines.push_back(
-            "CIPO fused  d=" + fmt(result.cipo_fusion.distance_m, 1) + " m"
-            "  v=" + fmt(result.cipo_fusion.velocity_ms, 2) + " m/s"
-            "  \xb1" + fmt(result.cipo_fusion.distance_stddev_m, 1) + " m");
-    }
-    const double wall_ms = lt.pipeline_ms;
-    lines.push_back(
-        "Parallel wall " + fmt(wall_ms) + " ms  (" + fmt(1000.0 / wall_ms, 1) + " fps)");
-    return lines;
-}
-
-static int run_video_mode(
-    InferencePipeline& pipeline,
-    const VisionPilotConfig& cfg,
-    const std::string& video_path_override)
-{
-    std::string video_path = video_path_override.empty()
-        ? cfg.source.video_path : video_path_override;
-
-    cv::VideoCapture cap(video_path);
-    if (!cap.isOpened()) {
-        std::cerr << "[VisionPilot] Failed to open video: " << video_path << "\n";
-        return 1;
-    }
-
-    const double file_fps = cap.get(cv::CAP_PROP_FPS);
-    const int    total_frames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
-    const int    width  = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
-    const int    height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
-
-    std::cout << "[VisionPilot] Video mode\n"
-              << "  path: " << video_path << "\n"
-              << "  " << width << "x" << height
-              << "  fps=" << file_fps
-              << "  frames=" << total_frames
-              << "  realtime=" << (cfg.source.video_realtime ? "yes" : "no")
-              << "  loop=" << (cfg.source.video_loop ? "yes" : "no") << "\n";
-
+    // Optional initial inference check
     if (cfg.pipeline.initial_inference_check) {
-        if (!run_initial_inference_check(pipeline, cap)) {
-            return 1;
+        cv::Mat f1, f2;
+        if (cap.read(f1) && cap.read(f2)) {
+            pipeline.process(preprocess(f1), f1);
+            if (const auto r = pipeline.process(preprocess(f2), f2); r)
+                VP_INFO("Initial check OK — d=%.1f m  v=%.2f m/s  wall=%.1f ms",
+                        r->cipo.distance_m, r->cipo.velocity_ms, r->latency.pipeline_ms);
         }
+        cap.set(cv::CAP_PROP_POS_FRAMES, 0); pipeline.reset();
     }
 
-    const auto frame_period = (cfg.source.video_realtime && file_fps > 1.0)
-        ? std::chrono::duration<double>(1.0 / file_fps)
-        : std::chrono::duration<double>(0);
+    const double fps = cap.get(cv::CAP_PROP_FPS);
+    const auto period = (cfg.source.video_realtime && fps > 1.0)
+        ? std::chrono::duration<double>(1.0 / fps) : std::chrono::duration<double>(0);
 
-    while (true) {
-        auto tick_start = std::chrono::steady_clock::now();
-
-        cv::Mat frame;
+    cv::Mat frame;
+    for (;;) {
+        const auto t0 = std::chrono::steady_clock::now();
         if (!cap.read(frame) || frame.empty()) {
-            if (cfg.source.video_loop) {
-                cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-                pipeline.reset();
-                continue;
-            }
-            std::cout << "[VisionPilot] End of video\n";
+            if (cfg.source.video_loop) { cap.set(cv::CAP_PROP_POS_FRAMES, 0); pipeline.reset(); continue; }
+            VP_INFO("End of video.");
             break;
         }
 
-        cv::Mat preprocessed = spatial_preprocess(frame);
-        auto result = pipeline.process(preprocessed);
+        const auto result = pipeline.process(preprocess(frame), frame);
 
-        if (result) {
-            // Print latency to console every 30 frames
-            if (result->frame_id % 30 == 0) {
-                pipeline.latency_stats().print();
-            }
-            auto overlay = make_inference_overlay(*result, "video");
-            visualization::render_frame(frame, "VisionPilot", overlay);
-        } else {
-            visualization::render_frame(
-                frame, "VisionPilot",
-                {"video: " + video_path, "warming up (need 2 frames)..."});
-        }
+        if (result && result->frame_id % 30 == 0) pipeline.latency().print();
 
-        if (cfg.source.video_realtime && file_fps > 1.0) {
-            const auto elapsed = std::chrono::steady_clock::now() - tick_start;
-            const auto sleep_for = frame_period - elapsed;
-            if (sleep_for.count() > 0) {
-                std::this_thread::sleep_for(sleep_for);
-            }
+        visualization::render_frame(frame, "VisionPilot",
+            result ? build_overlay(*result, "video")
+                   : std::vector<std::string>{"warming up..."});
+
+        if (period.count() > 0) {
+            const auto rem = period - (std::chrono::steady_clock::now() - t0);
+            if (rem.count() > 0) std::this_thread::sleep_for(rem);
         }
     }
-
     visualization::close_windows();
     return 0;
+}
+
+static void run_ros2(InferencePipeline& pipeline, const VisionPilotConfig& cfg,
+                     const std::string& topic)
+{
+    VP_INFO("ROS2 mode | topic: %s", topic.c_str());
+    camera_subscriber::ROS2ImageSubscriber sub(topic);
+
+    for (;;) {
+        auto [ok, frame] = sub.get_latest_frame();
+        if (!ok || frame.empty()) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
+
+        const auto result = pipeline.process(preprocess(frame), frame);
+        if (!result) continue;
+
+        if (result->frame_id % 30 == 0) pipeline.latency().print();
+        visualization::render_frame(frame, "VisionPilot", build_overlay(*result, topic));
+    }
+    visualization::close_windows();
+}
+
+static void run_v4l2(InferencePipeline& pipeline, const VisionPilotConfig& cfg,
+                     const std::string& device, int fps)
+{
+    VP_INFO("V4L2 mode | device: %s  fps: %d", device.c_str(), fps);
+    v4l2_interface::V4L2Reader reader(device, static_cast<uint32_t>(fps));
+    if (!reader.is_device_open()) { VP_ERROR("Failed to open: %s", device.c_str()); return; }
+
+    for (;;) {
+        auto [ok, frame] = reader.get_latest_frame();
+        if (!ok || frame.empty()) continue;
+
+        const auto result = pipeline.process(preprocess(frame), frame);
+        if (!result) continue;
+
+        if (result->frame_id % 30 == 0) pipeline.latency().print();
+        visualization::render_frame(frame, "VisionPilot", build_overlay(*result, device));
+    }
+    visualization::close_windows();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
-
 int main(int argc, char** argv)
 {
-    const int mode_idx = index_of_mode_arg(argc, argv);
-
-    const std::string config_path = resolve_vision_pilot_config_path(argc, argv);
-    if (config_path.empty()) {
-        std::cerr << "[VisionPilot] No config file found.\n"
-                  << "  cp config/vision_pilot.conf.example config/vision_pilot.conf\n"
-                  << "  Or: export VISIONPILOT_CONFIG=/path/to/vision_pilot.conf\n";
+    const std::string cfg_path = resolve_vision_pilot_config_path(argc, argv);
+    if (cfg_path.empty()) {
+        VP_ERROR("No config file found.");
+        VP_ERROR("  cp config/vision_pilot.conf.example config/vision_pilot.conf");
+        VP_ERROR("  or: export VISIONPILOT_CONFIG=/path/to/vision_pilot.conf");
         return 1;
     }
 
     VisionPilotConfig cfg;
-    try {
-        cfg = load_vision_pilot_config(config_path);
-    } catch (const std::exception& e) {
-        std::cerr << "[VisionPilot] Config error: " << e.what() << "\n";
-        return 1;
+    try { cfg = load_vision_pilot_config(cfg_path); }
+    catch (const std::exception& e) { VP_ERROR("Config: %s", e.what()); return 1; }
+
+    VP_INFO("Config    : %s", cfg_path.c_str());
+    VP_INFO("AutoDrive : %s", cfg.autodrive_model.c_str());
+    VP_INFO("AutoSteer : %s", cfg.autosteer_model.c_str());
+    VP_INFO("AutoSpeed : %s", cfg.autospeed_model.c_str());
+    VP_INFO("Provider  : %s", cfg.engine_cfg.provider.c_str());
+    VP_INFO("Homography: %s", cfg.homography_path.empty() ? "(none — tracker disabled)" : cfg.homography_path.c_str());
+
+    ve::OnnxEngine     engine(cfg.engine_cfg);
+    InferencePipeline  pipeline(engine, cfg);
+
+    switch (cfg.source.mode) {
+        case SourceMode::Video:
+            return run_video(pipeline, cfg, cfg.source.video_path);
+
+        case SourceMode::Ros2:
+            run_ros2(pipeline, cfg, cfg.source.ros2_topic);
+            break;
+
+        case SourceMode::V4l2:
+            run_v4l2(pipeline, cfg, cfg.source.v4l2_device, cfg.source.v4l2_fps);
+            break;
     }
-
-    SourceMode mode = cfg.source.mode;
-    if (mode_idx >= 0 && mode_idx < argc) {
-        mode = static_cast<SourceMode>(std::stoi(argv[mode_idx]));
-    }
-
-    std::cout << "[VisionPilot] Config: " << config_path << "\n"
-              << "  autodrive: " << cfg.autodrive_model << "\n"
-              << "  autosteer: " << cfg.autosteer_model << "\n"
-              << "  autospeed: " << cfg.autospeed_model << "\n"
-              << "  provider:  " << cfg.engine_cfg.provider << "\n"
-              << "  source:    ";
-    switch (mode) {
-        case SourceMode::Ros2:  std::cout << "ros2\n"; break;
-        case SourceMode::V4l2:  std::cout << "v4l2\n"; break;
-        case SourceMode::Video: std::cout << "video  " << cfg.source.video_path << "\n"; break;
-    }
-
-    visionpilot::engine::OnnxEngine ort_engine(cfg.engine_cfg);
-    InferencePipeline  pipeline(ort_engine, cfg);
-
-    // ════════════════════════════════════════════════════════════════════════
-    // VIDEO MODE  (ZOD mp4 / any OpenCV-readable file)
-    // ════════════════════════════════════════════════════════════════════════
-    if (mode == SourceMode::Video) {
-        const std::string video_override =
-            (mode_idx >= 0 && mode_idx + 1 < argc) ? argv[mode_idx + 1] : "";
-        return run_video_mode(pipeline, cfg, video_override);
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
-    // ROS2 MODE
-    // ════════════════════════════════════════════════════════════════════════
-    if (mode == SourceMode::Ros2) {
-
-        const std::string topic = (mode_idx >= 0 && mode_idx + 1 < argc)
-            ? argv[mode_idx + 1] : cfg.source.ros2_topic;
-        std::cout << "[VisionPilot] ROS2 mode | topic: " << topic << "\n";
-
-        camera_subscriber::ROS2ImageSubscriber ros2_sub(topic);
-
-        while (true) {
-            auto [has_frame, frame] = ros2_sub.get_latest_frame();
-
-            if (!has_frame || frame.empty()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                continue;
-            }
-
-            cv::Mat preprocessed = spatial_preprocess(frame);
-            auto result = pipeline.process(preprocessed);
-
-            if (!result) {
-                // First frame — buffer warming up, nothing to output yet.
-                continue;
-            }
-
-            // ── Downstream: use result->auto_drive / auto_steer / auto_speed
-            // TODO: hand off to planning / control / visualization modules.
-
-            auto stats = ros2_sub.get_stats();
-            std::vector<std::string> overlay = {
-                "topic: "            + topic,
-                "frame: "            + std::to_string(result->frame_id),
-                "frames received: "  + std::to_string(stats.frames_received),
-                "frames dropped: "   + std::to_string(stats.frames_dropped),
-            };
-            visualization::render_frame(frame, "VisionPilot", overlay);
-        }
-
-        visualization::close_windows();
-
-    // ════════════════════════════════════════════════════════════════════════
-    // V4L2 MODE
-    // ════════════════════════════════════════════════════════════════════════
-    } else if (mode == SourceMode::V4l2) {
-
-        const std::string device_path = (mode_idx >= 0 && mode_idx + 1 < argc)
-            ? argv[mode_idx + 1] : cfg.source.v4l2_device;
-        const uint32_t target_fps = (mode_idx >= 0 && mode_idx + 2 < argc)
-            ? static_cast<uint32_t>(std::stoi(argv[mode_idx + 2]))
-            : static_cast<uint32_t>(cfg.source.v4l2_fps);
-
-        std::cout << "[VisionPilot] V4L2 mode | device: " << device_path
-                  << "  fps: " << target_fps << "\n";
-
-        v4l2_interface::V4L2Reader v4l2_reader(device_path, target_fps);
-        if (!v4l2_reader.is_device_open()) {
-            std::cerr << "[VisionPilot] Failed to open V4L2 device: " << device_path << "\n";
-            return 1;
-        }
-
-        while (true) {
-            auto [has_frame, frame] = v4l2_reader.get_latest_frame();
-
-            if (!has_frame || frame.empty()) continue;
-
-            cv::Mat preprocessed = spatial_preprocess(frame);
-            auto result = pipeline.process(preprocessed);
-
-            if (!result) continue;
-
-            // ── Downstream: use result->auto_drive / auto_steer / auto_speed
-            // TODO: hand off to planning / control / visualization modules.
-
-            auto stats = v4l2_reader.get_stats();
-            std::vector<std::string> overlay = {
-                "device: "    + device_path,
-                "frame: "     + std::to_string(result->frame_id),
-                "fps: "       + std::to_string(static_cast<int>(stats.current_fps)),
-                "resolution: "+ std::to_string(stats.current_width) + "x"
-                              + std::to_string(stats.current_height),
-            };
-            visualization::render_frame(frame, "VisionPilot", overlay);
-        }
-
-        visualization::close_windows();
-
-    } else {
-        std::cerr << "[VisionPilot] Invalid mode.\n"
-                  << "Usage: " << argv[0] << " [--config path] [mode] [args...]\n"
-                  << "  Omit mode to use source.mode from config (default: video).\n"
-                  << "  mode 0 / ros2  : [topic]\n"
-                  << "  mode 1 / v4l2  : [device] [fps]\n"
-                  << "  mode 2 / video : [path]  (overrides source.video_path)\n";
-        return 1;
-    }
-
     return 0;
 }
