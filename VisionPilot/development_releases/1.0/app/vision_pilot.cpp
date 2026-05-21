@@ -112,7 +112,9 @@ int main(int argc, char** argv) {
 
             std::cout << "Starting WebRTC streamer on port: " << webrtc_port << "\n";
 
+            // Init WebRTC streamer instance (one-liner - Atanasko's request)
             webrtc_streamer = std::make_unique<visualization::WebRTCStreamer>();
+            
             if (!webrtc_streamer->init(webrtc_port)) {
                 std::cerr << "Failed to start WebRTC streamer." << std::endl;
                 return 1;
