@@ -45,8 +45,6 @@ public:
         float process_noise_vel_ms = 0.20f;   // used inside PF predict only
         float autodrive_noise_m    = 15.f;
         float homo_noise_m         = 5.f;     // homography distance 1-sigma noise
-        // Lateral half-width (m) of the in-path corridor for bbox selection.
-        float cipo_lateral_m       = 3.5f;
         // EMA factor for velocity smoothing (higher = more responsive, noisier).
         float velocity_ema_alpha   = 0.3f;
         std::string homography_path = "";

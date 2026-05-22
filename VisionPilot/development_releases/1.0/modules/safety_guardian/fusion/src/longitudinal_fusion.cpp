@@ -193,21 +193,19 @@ LongitudinalFusion::project_closest(const std::vector<models::Detection>& dets) 
     best.distance_m = std::numeric_limits<float>::max();
     best.stddev_m   = cfg_.homo_noise_m;
 
+    // ZOD convention: world_y is negative for objects ahead.  A vehicle 30m
+    // ahead projects to roughly (x≈0, y≈-30).  Distance = |y|.
     for (const auto& d : dets) {
-        // Bottom-centre of the bounding box
         const float ux = (d.x1 + d.x2) * 0.5f;
         const float uy = d.y2;
 
-        // Project through homography to world coordinates
         std::vector<cv::Point2f> src = {cv::Point2f(ux, uy)}, dst;
         cv::perspectiveTransform(src, dst, H_);
         const cv::Point2f& wp = dst[0];
 
-        // Only keep objects in front of the vehicle and within the in-path corridor
-        if (wp.y <= 1.f) continue;                            // behind / on ego
-        if (std::abs(wp.x) > cfg_.cipo_lateral_m) continue;  // too far left/right
+        if (wp.y >= -1.f) continue;  // not in front of ego (at least 1 m ahead)
 
-        const float dist = std::sqrt(wp.x * wp.x + wp.y * wp.y);
+        const float dist = -wp.y;    // forward distance in metres
         if (dist < best.distance_m) {
             best.distance_m = dist;
             best.valid      = true;
