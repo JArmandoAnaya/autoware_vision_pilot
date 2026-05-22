@@ -19,9 +19,9 @@ struct CIPOFusionEstimate {
     float velocity_ms       = 0.f;   // negative = approaching; derived as Δd/Δt
     float distance_stddev_m = 0.f;
 
-    // Raw homography distance from AutoSpeed bboxes (no tracking state)
-    bool  homo_found        = false;
-    float homo_dist_m       = 0.f;
+    // Raw CIPO distance from AutoSpeed bboxes via homography (no tracking state)
+    bool  cipo_raw_found    = false;
+    float cipo_raw_dist_m   = 0.f;
 };
 
 // ─── LongitudinalFusion ────────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ public:
         float process_noise_dist_m = 0.50f;
         float process_noise_vel_ms = 0.20f;   // used inside PF predict only
         float autodrive_noise_m    = 15.f;
-        float homo_noise_m         = 5.f;     // homography distance 1-sigma noise
+        float cipo_noise_m         = 5.f;     // CIPO raw distance 1-sigma noise
         // EMA factor for velocity smoothing (higher = more responsive, noisier).
         float velocity_ema_alpha   = 0.3f;
         std::string homography_path = "";
@@ -73,7 +73,7 @@ private:
 
     void  init_from(float dist_m, float stddev_m);
     void  predict(float dt_s);
-    void  weight_update(const Meas& ad, const Meas& homo);
+    void  weight_update(const Meas& ad, const Meas& cipo_raw);
     std::vector<float> linear_weights() const;
     float effective_n() const;
     void  resample();
@@ -86,9 +86,9 @@ private:
     float  velocity_ema_  = 0.f;
     std::mt19937 rng_;
 
-    // Homography — loaded once from cfg_.homography_path
+    // Homography matrix — loaded once from cfg_.homography_path
     cv::Mat H_;
-    bool    homo_loaded_ = false;
+    bool    H_loaded_ = false;
 };
 
 }  // namespace visionpilot::fusion
