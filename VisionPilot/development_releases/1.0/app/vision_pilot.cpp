@@ -245,6 +245,22 @@ static std::string fmtd(double v, int d = 1) {
     char b[24]; std::snprintf(b, sizeof(b), "%.*f", d, v); return b;
 }
 
+// Draw AutoSpeed detections onto the preprocessed 1024×512 frame for debug.
+static void draw_detections(cv::Mat& img, const FrameOutputs& r) {
+    if (!r.auto_speed.valid) return;
+    for (const auto& d : r.auto_speed.detections) {
+        const cv::Point tl(static_cast<int>(d.x1), static_cast<int>(d.y1));
+        const cv::Point br(static_cast<int>(d.x2), static_cast<int>(d.y2));
+        cv::rectangle(img, tl, br, cv::Scalar(0, 255, 0), 2);
+        char label[32];
+        std::snprintf(label, sizeof(label), "L%d %.0f%%",
+                      d.class_id, d.score * 100.f);
+        cv::putText(img, label, cv::Point(tl.x, std::max(tl.y - 4, 10)),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                    cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
+    }
+}
+
 static std::vector<std::string> build_overlay(const FrameOutputs& r, const std::string& src) {
     static constexpr float D_MAX = 150.f;  // AutoDrive model range
     const auto& lt = r.latency;
@@ -261,18 +277,15 @@ static std::vector<std::string> build_overlay(const FrameOutputs& r, const std::
                     + "  curv=" + fmtd(r.auto_drive.curvature_raw, 4)
                     + "  [" + fmtd(lt.autodrive_ms) + " ms]");
     }
-    if (r.auto_steer.valid)
-        L.push_back("AutoSteer   xp=" + fmtd(r.auto_steer.xp[0], 3)
-                    + "  [" + fmtd(lt.autosteer_ms) + " ms]");
     if (r.auto_speed.valid)
         L.push_back("AutoSpeed   dets=" + std::to_string(r.auto_speed.detections.size())
                     + "  [" + fmtd(lt.autospeed_ms) + " ms]");
 
-    // ── AutoSpeed homography distance (raw, no tracking state) ──────────────
-    if (r.cipo.homo_found)
-        L.push_back("Homo        d=" + fmtd(r.cipo.homo_dist_m, 1) + " m [raw]");
+    // ── AutoSpeed CIPO raw distance (homography, no tracking state) ─────────
+    if (r.cipo.cipo_raw_found)
+        L.push_back("CIPO raw    d=" + fmtd(r.cipo.cipo_raw_dist_m, 1) + " m");
     else
-        L.push_back("Homo        (no CIPO)");
+        L.push_back("CIPO raw    (none)");
 
     // ── Particle-filter fused estimate ───────────────────────────────────────
     if (r.cipo.valid)
@@ -334,11 +347,13 @@ static int run_video(InferencePipeline& pipeline, const VisionPilotConfig& cfg,
             break;
         }
 
-        const auto result = pipeline.process(preprocess(frame, cfg.source.hfov_deg), frame);
+        cv::Mat prep = preprocess(frame, cfg.source.hfov_deg);
+        const auto result = pipeline.process(prep, frame);
 
         if (result && result->frame_id % 30 == 0) pipeline.latency().print();
 
-        visualization::render_frame(frame, "VisionPilot",
+        if (result) draw_detections(prep, *result);
+        visualization::render_frame(prep, "VisionPilot",
             result ? build_overlay(*result, "video")
                    : std::vector<std::string>{"warming up..."});
 
@@ -361,11 +376,13 @@ static void run_ros2(InferencePipeline& pipeline, const VisionPilotConfig& cfg,
         auto [ok, frame] = sub.get_latest_frame();
         if (!ok || frame.empty()) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
 
-        const auto result = pipeline.process(preprocess(frame, cfg.source.hfov_deg), frame);
+        cv::Mat prep = preprocess(frame, cfg.source.hfov_deg);
+        const auto result = pipeline.process(prep, frame);
         if (!result) continue;
 
         if (result->frame_id % 30 == 0) pipeline.latency().print();
-        visualization::render_frame(frame, "VisionPilot", build_overlay(*result, topic));
+        draw_detections(prep, *result);
+        visualization::render_frame(prep, "VisionPilot", build_overlay(*result, topic));
     }
     visualization::close_windows();
 }
@@ -381,11 +398,13 @@ static void run_v4l2(InferencePipeline& pipeline, const VisionPilotConfig& cfg,
         auto [ok, frame] = reader.get_latest_frame();
         if (!ok || frame.empty()) continue;
 
-        const auto result = pipeline.process(preprocess(frame, cfg.source.hfov_deg), frame);
+        cv::Mat prep = preprocess(frame, cfg.source.hfov_deg);
+        const auto result = pipeline.process(prep, frame);
         if (!result) continue;
 
         if (result->frame_id % 30 == 0) pipeline.latency().print();
-        visualization::render_frame(frame, "VisionPilot", build_overlay(*result, device));
+        draw_detections(prep, *result);
+        visualization::render_frame(prep, "VisionPilot", build_overlay(*result, device));
     }
     visualization::close_windows();
 }
