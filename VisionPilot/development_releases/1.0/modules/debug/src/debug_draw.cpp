@@ -200,24 +200,29 @@ static void draw_autosteer_ego_path(cv::Mat& img,
         y_pts[i] = (kPathPts <= 1) ? 0
                    : static_cast<int>(std::lround(static_cast<double>(i) * (H - 1) / (kPathPts - 1)));
 
-    static constexpr int kRows = 2;
-    for (int row = 0; row < kRows; ++row) {
-        std::vector<cv::Point> poly;
-        for (int i = 0; i < kPathPts; ++i) {
+    // Centerline: midpoint of row 0 / row 1 at each fixed image row (matches lateral fusion)
+    std::vector<cv::Point> poly;
+    for (int i = 0; i < kPathPts; ++i) {
+        float u_sum = 0.f;
+        int   n     = 0;
+        for (int row = 0; row < 2; ++row) {
             const int idx = row * kPathPts + i;
             if (steer.h_vector[idx] < 0.5f) continue;
-
-            const int u = static_cast<int>(steer.xp[idx] * static_cast<float>(W));
-            const int v = y_pts[i];
-            if (u < 0 || u >= W || v < 0 || v >= H) continue;
-
-            const cv::Point pt(u, v);
-            cv::circle(img, pt, 3, kClrEgoPath, -1, cv::LINE_AA);
-            poly.push_back(pt);
+            u_sum += steer.xp[idx];
+            ++n;
         }
-        if (poly.size() >= 2)
-            cv::polylines(img, poly, false, kClrEgoPath, 2, cv::LINE_AA);
+        if (n == 0) continue;
+
+        const int u = static_cast<int>((u_sum / static_cast<float>(n)) * static_cast<float>(W));
+        const int v = y_pts[i];
+        if (u < 0 || u >= W || v < 0 || v >= H) continue;
+
+        const cv::Point pt(u, v);
+        cv::circle(img, pt, 3, kClrEgoPath, -1, cv::LINE_AA);
+        poly.push_back(pt);
     }
+    if (poly.size() >= 2)
+        cv::polylines(img, poly, false, kClrEgoPath, 2, cv::LINE_AA);
 }
 
 // ─── Steering wheels from curvature (image_visualization.py) ─────────────────
@@ -317,6 +322,7 @@ static void draw_hud_panel(cv::Mat& img, const DebugView& v)
         const float curv = v.auto_drive.curvature_raw * veh.curv_scale;
         const float steer = curvature_to_steer_deg(curv, veh.wheelbase_m, veh.steer_ratio);
         text(c1x, y, "AutoDrive  d=" + fd(d_m, 1) + " m  k=" + fd(curv, 4)
+             + " (raw=" + fd(v.auto_drive.curvature_raw, 4) + ")"
              + "  steer=" + fd(steer, 1) + " deg  [" + fd(static_cast<float>(v.ad_ms), 1) + "ms]",
              kClrNormal, kSmall);
     } else {
