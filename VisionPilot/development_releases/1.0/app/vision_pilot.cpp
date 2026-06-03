@@ -22,6 +22,7 @@
 #include <models/auto_drive.hpp>
 #include <models/auto_steer.hpp>
 #include <models/auto_speed.hpp>
+#include <image_preprocessing/image_preprocessor.hpp>
 
 #include <opencv2/opencv.hpp>
 
@@ -242,24 +243,14 @@ private:
     std::string            homography_path_;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Preprocessing — center-crop to 50° HFOV, resize to NET_W × NET_H
-// (mirrors center_crop_50deg_resize_with_metadata in zod_manual_ground_homography.py)
-// ─────────────────────────────────────────────────────────────────────────────
-static cv::Mat preprocess(const cv::Mat& raw, float hfov_deg)
+static constexpr int kPrepW = 1024;
+static constexpr int kPrepH = 512;
+
+static cv::Mat preprocess_frame(const ImagePreprocessor& preprocessor, const cv::Mat& frame)
 {
-    static constexpr float TARGET_FOV = 50.f;
-    const int img_w = raw.cols, img_h = raw.rows;
-    int crop_w = static_cast<int>(std::lround(img_w * TARGET_FOV / hfov_deg));
-    int crop_h = crop_w / 2;
-    crop_w = std::clamp(crop_w, 1, img_w);
-    crop_h = std::clamp(crop_h, 1, img_h);
-    const cv::Rect roi((img_w - crop_w) / 2, (img_h - crop_h) / 2, crop_w, crop_h);
-    cv::Mat out;
-    cv::resize(raw(roi), out,
-               cv::Size(InferencePipeline::NET_W, InferencePipeline::NET_H),
-               0, 0, cv::INTER_LINEAR);
-    return out;
+    cv::Mat warped, resized;
+    preprocessor.preprocess(frame, warped, resized, cv::Size(kPrepW, kPrepH));
+    return warped;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,12 +258,12 @@ static cv::Mat preprocess(const cv::Mat& raw, float hfov_deg)
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void process_and_show(InferencePipeline& pipeline,
-                             const VisionPilotConfig& cfg,
+                             const ImagePreprocessor& preprocessor,
                              const cv::Mat& frame,
                              const std::string& src_label,
                              DisplayOutput& display)
 {
-    cv::Mat prep   = preprocess(frame, cfg.source.hfov_deg);
+    cv::Mat prep   = preprocess_frame(preprocessor, frame);
     auto    result = pipeline.process(prep, frame, src_label);
     if (!result) return;
 
@@ -283,7 +274,7 @@ static void process_and_show(InferencePipeline& pipeline,
 }
 
 static void run_live(InferencePipeline& pipeline,
-                     const VisionPilotConfig& cfg,
+                     const ImagePreprocessor& preprocessor,
                      camera_interface::CameraInterface& camera,
                      const std::string& src_label,
                      DisplayOutput& display)
@@ -298,7 +289,7 @@ static void run_live(InferencePipeline& pipeline,
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
-        process_and_show(pipeline, cfg, frame, src_label, display);
+        process_and_show(pipeline, preprocessor, frame, src_label, display);
     }
     visualization::close_windows();
 }
@@ -341,31 +332,32 @@ static bool init_display(DisplayOutput& display, int argc, char** argv)
 
 static int run_video(InferencePipeline& pipeline,
                      const VisionPilotConfig& cfg,
+                     const ImagePreprocessor& preprocessor,
                      const std::string& path,
                      DisplayOutput& display)
 {
     cv::VideoCapture cap(path);
     if (!cap.isOpened()) { VP_ERROR("Cannot open video: %s", path.c_str()); return 1; }
 
-    VP_INFO("Video: %s  %.0f fps  %dx%d  crop_hfov=%.0f→50  realtime=%s  loop=%s",
+    VP_INFO("Video: %s  %.0f fps  %dx%d  preprocess=C→%dx%d  realtime=%s  loop=%s",
             path.c_str(), cap.get(cv::CAP_PROP_FPS),
             static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH)),
             static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT)),
-            cfg.source.hfov_deg,
+            kPrepW, kPrepH,
             cfg.source.video_realtime ? "yes" : "no",
             cfg.source.video_loop     ? "yes" : "no");
 
     VP_INFO("GPU warmup...");
     { cv::Mat f;
       for (int i = 0; i < 4 && cap.read(f); ++i)
-          pipeline.process(preprocess(f, cfg.source.hfov_deg), f, "warmup");
+          pipeline.process(preprocess_frame(preprocessor, f), f, "warmup");
       cap.set(cv::CAP_PROP_POS_FRAMES, 0); pipeline.reset(); }
 
     if (cfg.pipeline.initial_inference_check) {
         cv::Mat f1, f2;
         if (cap.read(f1) && cap.read(f2)) {
-            pipeline.process(preprocess(f1, cfg.source.hfov_deg), f1, "check");
-            if (const auto r = pipeline.process(preprocess(f2, cfg.source.hfov_deg), f2, "check"); r)
+            pipeline.process(preprocess_frame(preprocessor, f1), f1, "check");
+            if (const auto r = pipeline.process(preprocess_frame(preprocessor, f2), f2, "check"); r)
                 VP_INFO("Initial check OK — d=%.1f m  v=%.2f m/s  wall=%.1f ms",
                         r->cipo.distance_m, r->cipo.velocity_ms, r->wall_ms);
         }
@@ -384,7 +376,7 @@ static int run_video(InferencePipeline& pipeline,
             VP_INFO("End of video."); break;
         }
 
-        cv::Mat prep   = preprocess(frame, cfg.source.hfov_deg);
+        cv::Mat prep   = preprocess_frame(preprocessor, frame);
         auto    result = pipeline.process(prep, frame, "video");
         if (result) {
             if (result->frame_id % 30 == 0) pipeline.latency().print();
@@ -404,27 +396,27 @@ static int run_video(InferencePipeline& pipeline,
 }
 
 static void run_ros2(InferencePipeline& pipeline,
-                     const VisionPilotConfig& cfg,
+                     const ImagePreprocessor& preprocessor,
                      const std::string& topic,
                      DisplayOutput& display)
 {
 #ifdef ENABLE_ROS2_INTERFACE
     VP_INFO("ROS2 mode | topic: %s", topic.c_str());
     camera_interface::ROS2ImageSubscriber sub(topic);
-    run_live(pipeline, cfg, sub, topic, display);
+    run_live(pipeline, preprocessor, sub, topic, display);
 #else
     VP_ERROR("ROS2 mode requested but VisionPilot was built with ENABLE_ROS2_INTERFACE=OFF");
 #endif
 }
 
 static void run_v4l2(InferencePipeline& pipeline,
-                     const VisionPilotConfig& cfg,
+                     const ImagePreprocessor& preprocessor,
                      const std::string& device, int fps,
                      DisplayOutput& display)
 {
     VP_INFO("V4L2 mode | device: %s  fps: %d", device.c_str(), fps);
     camera_interface::V4L2CameraInterface reader(device, static_cast<uint32_t>(fps));
-    run_live(pipeline, cfg, reader, device, display);
+    run_live(pipeline, preprocessor, reader, device, display);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -451,6 +443,8 @@ int main(int argc, char** argv)
     VP_INFO("Provider  : %s", cfg.engine_cfg.provider.c_str());
     VP_INFO("Homography: %s", cfg.homography_path.empty() ? "(none)" : cfg.homography_path.c_str());
     VP_INFO("FusionDbg : %s", cfg.fusion_debug ? "on" : "off");
+    ImagePreprocessor preprocessor;
+    VP_INFO("Preprocess: C warp → %dx%d (build/config/homography_C_matrix.yaml)", kPrepW, kPrepH);
 
     ve::OnnxEngine    engine(cfg.engine_cfg);
     InferencePipeline pipeline(engine, cfg);
@@ -463,12 +457,12 @@ int main(int argc, char** argv)
 
     switch (cfg.source.mode) {
         case SourceMode::Video:
-            return run_video(pipeline, cfg, cfg.source.video_path, display);
+            return run_video(pipeline, cfg, preprocessor, cfg.source.video_path, display);
         case SourceMode::Ros2:
-            run_ros2(pipeline, cfg, cfg.source.ros2_topic, display);
+            run_ros2(pipeline, preprocessor, cfg.source.ros2_topic, display);
             break;
         case SourceMode::V4l2:
-            run_v4l2(pipeline, cfg, cfg.source.v4l2_device, cfg.source.v4l2_fps, display);
+            run_v4l2(pipeline, preprocessor, cfg.source.v4l2_device, cfg.source.v4l2_fps, display);
             break;
     }
     return 0;
