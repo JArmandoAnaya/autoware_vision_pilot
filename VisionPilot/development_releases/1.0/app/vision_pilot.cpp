@@ -85,6 +85,7 @@ public:
         , auto_steer_(engine, cfg.autosteer_model)
         , auto_speed_(engine, cfg.autospeed_model)
         , wheel_dir_(cfg.wheel_dir)
+        , homography_path_(cfg.homography_path)
     {
         vf::LongitudinalFusion::Config lc;
         lc.homography_path = cfg.homography_path;
@@ -159,7 +160,8 @@ public:
         view.auto_speed    = res_speed;
         view.cipo          = cipo;
         view.lateral       = lateral;
-        view.wheel_dir     = wheel_dir_;
+        view.wheel_dir        = wheel_dir_;
+        view.homography_path  = homography_path_;
 
         return view;
     }
@@ -211,6 +213,7 @@ private:
     uint64_t               frame_count_ = 0;
     LatencyStats           stats_;
     std::string            wheel_dir_;
+    std::string            homography_path_;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -371,6 +374,7 @@ int main(int argc, char** argv)
     ve::OnnxEngine    engine(cfg.engine_cfg);
     InferencePipeline pipeline(engine, cfg);
     vd::init_wheel_assets(cfg.wheel_dir);
+    vd::init_homography(cfg.homography_path);
 
     switch (cfg.source.mode) {
         case SourceMode::Video: return run_video(pipeline, cfg, cfg.source.video_path);
