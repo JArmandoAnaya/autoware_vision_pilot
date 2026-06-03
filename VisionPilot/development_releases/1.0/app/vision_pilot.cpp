@@ -5,6 +5,7 @@
 #include <logging/logger.hpp>
 #include <debug/debug_draw.hpp>
 
+#include <camera_interface/camera_interface.hpp>
 #include <camera_interface/v4l2_camera_interface.hpp>
 #include <visualization/visualization.hpp>
 #ifdef ENABLE_WEBRTC
@@ -262,7 +263,80 @@ static cv::Mat preprocess(const cv::Mat& raw, float hfov_deg)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Source mode runners — one liners
+// Shared per-frame path (live camera / ROS2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void process_and_show(InferencePipeline& pipeline,
+                             const VisionPilotConfig& cfg,
+                             const cv::Mat& frame,
+                             const std::string& src_label,
+                             DisplayOutput& display)
+{
+    cv::Mat prep   = preprocess(frame, cfg.source.hfov_deg);
+    auto    result = pipeline.process(prep, frame, src_label);
+    if (!result) return;
+
+    if (result->frame_id % 30 == 0)
+        pipeline.latency().print();
+    vd::annotate_frame(prep, *result);
+    present_frame(prep, {}, display);
+}
+
+static void run_live(InferencePipeline& pipeline,
+                     const VisionPilotConfig& cfg,
+                     camera_interface::CameraInterface& camera,
+                     const std::string& src_label,
+                     DisplayOutput& display)
+{
+    if (!camera.is_device_open()) {
+        VP_ERROR("Failed to open camera source: %s", src_label.c_str());
+        return;
+    }
+    for (;;) {
+        auto [ok, frame] = camera.get_latest_frame();
+        if (!ok || frame.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        process_and_show(pipeline, cfg, frame, src_label, display);
+    }
+    visualization::close_windows();
+}
+
+static bool init_display(DisplayOutput& display, int argc, char** argv)
+{
+#ifdef ENABLE_WEBRTC
+    bool start_webrtc = false;
+    uint16_t webrtc_port = 8080;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--webrtc") start_webrtc = true;
+        if (arg == "--webrtc-port" && i + 1 < argc)
+            webrtc_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+    }
+    display.show_local_preview = !start_webrtc;
+    if (start_webrtc) {
+        VP_INFO("WebRTC streamer on port %u (local preview disabled)", webrtc_port);
+        display.webrtc = std::make_unique<visualization::WebRTCStreamer>();
+        if (!display.webrtc->init(webrtc_port)) {
+            VP_ERROR("Failed to start WebRTC streamer on port %u", webrtc_port);
+            return false;
+        }
+    }
+    return true;
+#else
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--webrtc") {
+            VP_WARN("--webrtc ignored: VisionPilot built without ENABLE_WEBRTC");
+            break;
+        }
+    }
+    return true;
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Source mode runners
 // ─────────────────────────────────────────────────────────────────────────────
 
 static int run_video(InferencePipeline& pipeline,
@@ -312,14 +386,13 @@ static int run_video(InferencePipeline& pipeline,
 
         cv::Mat prep   = preprocess(frame, cfg.source.hfov_deg);
         auto    result = pipeline.process(prep, frame, "video");
-
         if (result) {
             if (result->frame_id % 30 == 0) pipeline.latency().print();
             vd::annotate_frame(prep, *result);
+            present_frame(prep, {}, display);
+        } else {
+            present_frame(prep, {"warming up..."}, display);
         }
-        present_frame(prep,
-            result ? std::vector<std::string>{} : std::vector<std::string>{"warming up..."},
-            display);
 
         if (period.count() > 0) {
             const auto rem = period - (std::chrono::steady_clock::now() - t0);
@@ -338,19 +411,7 @@ static void run_ros2(InferencePipeline& pipeline,
 #ifdef ENABLE_ROS2_INTERFACE
     VP_INFO("ROS2 mode | topic: %s", topic.c_str());
     camera_interface::ROS2ImageSubscriber sub(topic);
-    for (;;) {
-        auto [ok, frame] = sub.get_latest_frame();
-        if (!ok || frame.empty()) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
-
-        cv::Mat prep   = preprocess(frame, cfg.source.hfov_deg);
-        auto    result = pipeline.process(prep, frame, topic);
-        if (!result) continue;
-
-        if (result->frame_id % 30 == 0) pipeline.latency().print();
-        vd::annotate_frame(prep, *result);
-        present_frame(prep, {}, display);
-    }
-    visualization::close_windows();
+    run_live(pipeline, cfg, sub, topic, display);
 #else
     VP_ERROR("ROS2 mode requested but VisionPilot was built with ENABLE_ROS2_INTERFACE=OFF");
 #endif
@@ -363,20 +424,7 @@ static void run_v4l2(InferencePipeline& pipeline,
 {
     VP_INFO("V4L2 mode | device: %s  fps: %d", device.c_str(), fps);
     camera_interface::V4L2CameraInterface reader(device, static_cast<uint32_t>(fps));
-    if (!reader.is_device_open()) { VP_ERROR("Failed to open: %s", device.c_str()); return; }
-    for (;;) {
-        auto [ok, frame] = reader.get_latest_frame();
-        if (!ok || frame.empty()) continue;
-
-        cv::Mat prep   = preprocess(frame, cfg.source.hfov_deg);
-        auto    result = pipeline.process(prep, frame, device);
-        if (!result) continue;
-
-        if (result->frame_id % 30 == 0) pipeline.latency().print();
-        vd::annotate_frame(prep, *result);
-        present_frame(prep, {}, display);
-    }
-    visualization::close_windows();
+    run_live(pipeline, cfg, reader, device, display);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -410,32 +458,8 @@ int main(int argc, char** argv)
     vd::init_homography(cfg.homography_path);
 
     DisplayOutput display;
-#ifdef ENABLE_WEBRTC
-    bool start_webrtc = false;
-    uint16_t webrtc_port = 8080;
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        if (arg == "--webrtc") start_webrtc = true;
-        if (arg == "--webrtc-port" && i + 1 < argc)
-            webrtc_port = static_cast<uint16_t>(std::stoi(argv[++i]));
-    }
-    display.show_local_preview = !start_webrtc;
-    if (start_webrtc) {
-        VP_INFO("WebRTC streamer on port %u (local preview disabled)", webrtc_port);
-        display.webrtc = std::make_unique<visualization::WebRTCStreamer>();
-        if (!display.webrtc->init(webrtc_port)) {
-            VP_ERROR("Failed to start WebRTC streamer on port %u", webrtc_port);
-            return 1;
-        }
-    }
-#else
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--webrtc") {
-            VP_WARN("--webrtc ignored: VisionPilot built without ENABLE_WEBRTC");
-            break;
-        }
-    }
-#endif
+    if (!init_display(display, argc, argv))
+        return 1;
 
     switch (cfg.source.mode) {
         case SourceMode::Video:
