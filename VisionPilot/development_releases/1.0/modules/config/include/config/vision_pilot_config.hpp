@@ -15,8 +15,6 @@ struct SourceConfig {
     std::string ros2_topic   = "/camera/image";
     std::string v4l2_device  = "/dev/video0";
     int         v4l2_fps     = 10;
-    // Native camera horizontal FOV (deg). ZOD front_blur ≈ 120 from calibration.
-    float       hfov_deg     = 120.f;
 };
 
 struct PipelineConfig {
