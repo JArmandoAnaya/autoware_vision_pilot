@@ -5,6 +5,7 @@
 #include <models/auto_drive.hpp>
 #include <models/auto_steer.hpp>
 #include <models/auto_speed.hpp>
+#include <models/inference.hpp>
 #include <opencv2/core.hpp>
 
 #include <string>
@@ -41,6 +42,21 @@ struct DebugView {
     // Homography YAML (image → world); used to back-project fused path onto the frame
     std::string homography_path;
 };
+
+inline DebugView debug_view_from(
+    const models::InferenceFrameResult& r,
+    const std::string& src_label,
+    const std::string& wheel_dir,
+    const std::string& homography_path)
+{
+    return {
+        r.frame_id, r.wall_ms, r.pre_ms, r.ad_ms, r.as_ms, r.asp_ms,
+        src_label,
+        r.auto_drive, r.auto_steer, r.auto_speed,
+        r.cipo, r.lateral,
+        {}, wheel_dir, homography_path,
+    };
+}
 
 void init_wheel_assets(const std::string& wheel_dir);
 void init_homography(const std::string& yaml_path);
