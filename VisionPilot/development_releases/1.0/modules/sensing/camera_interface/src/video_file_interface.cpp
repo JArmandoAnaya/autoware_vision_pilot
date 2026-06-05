@@ -30,11 +30,9 @@ std::tuple<bool, cv::Mat> VideoFileInterface::get_latest_frame()
     cv::Mat frame;
     if (!cap_.read(frame) || frame.empty()) {
         if (!loop_) {
-            finished_ = true;
             return {false, {}};
         }
         cap_.set(cv::CAP_PROP_POS_FRAMES, 0);
-        rewind_pending_ = true;
         if (!cap_.read(frame) || frame.empty()) {
             return {false, {}};
         }
@@ -54,25 +52,6 @@ std::tuple<bool, cv::Mat> VideoFileInterface::get_latest_frame()
 std::vector<std::string> VideoFileInterface::get_overlay() const
 {
     return {"video: " + path_};
-}
-
-bool VideoFileInterface::is_finished() const
-{
-    return finished_;
-}
-
-bool VideoFileInterface::take_rewind()
-{
-    if (!rewind_pending_) {
-        return false;
-    }
-    rewind_pending_ = false;
-    return true;
-}
-
-std::string VideoFileInterface::source_label() const
-{
-    return "video";
 }
 
 }  // namespace camera_interface
