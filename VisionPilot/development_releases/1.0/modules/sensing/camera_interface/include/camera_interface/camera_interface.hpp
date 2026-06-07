@@ -26,14 +26,9 @@ namespace camera_interface {
         };
 
         virtual bool is_device_open() const = 0;
+        // {false, {}} = no frame yet (live) or stream ended (video, no loop).
         virtual std::tuple<bool, cv::Mat> get_latest_frame() = 0;
         virtual std::vector<std::string> get_overlay() const = 0;
-
-        // Live sources never finish; video returns true after EOF when not looping.
-        virtual bool is_finished() const { return false; }
-        // One-shot after a video loop rewind (caller may reset pipeline).
-        virtual bool take_rewind() { return false; }
-        virtual std::string source_label() const { return {}; }
     };
 }
 

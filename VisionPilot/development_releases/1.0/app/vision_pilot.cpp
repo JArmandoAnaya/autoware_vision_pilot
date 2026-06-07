@@ -65,17 +65,16 @@ int main(int argc, char** argv)
     }
 
     const cv::Size net_size(vm::AutoDrive::NET_W, vm::AutoDrive::NET_H);
+    const std::string label = source_label(cfg.source);
     cv::Mat frame, warped, resized;
 
     // ── 5. Main loop ────────────────────────────────────────────────────────
-    while (!source->is_finished()) {
+    while (true) {
         auto [ok, frame] = source->get_latest_frame();
         if (!ok || frame.empty()) {
+            if (cfg.source.mode == SourceMode::Video && !cfg.source.video_loop) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
-        }
-        if (source->take_rewind()) {
-            pipeline.reset();
         }
 
         preprocessor.preprocess(frame, warped, resized, net_size);
@@ -83,7 +82,7 @@ int main(int argc, char** argv)
         if (const auto r = pipeline.process(warped)) {
             if (r->frame_id % 30 == 0) pipeline.latency().print();
             vd::annotate_frame(warped, vd::debug_view_from(
-                *r, source->source_label(), cfg.wheel_dir, cfg.homography_path));
+                *r, label, cfg.wheel_dir, cfg.homography_path));
         }
 
         if (show_window) visualization::render_frame(warped, "VisionPilot", {});

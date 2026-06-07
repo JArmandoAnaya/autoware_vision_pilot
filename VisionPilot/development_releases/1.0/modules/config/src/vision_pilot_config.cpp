@@ -98,6 +98,16 @@ SourceMode parse_source_mode(const std::string& v)
     throw std::runtime_error("Invalid source.mode: '" + v + "'. Use video|ros2|v4l2 (or 0/1/2)");
 }
 
+std::string source_label(const SourceConfig& source)
+{
+    switch (source.mode) {
+    case SourceMode::Video: return "video";
+    case SourceMode::V4l2:  return source.v4l2_device;
+    case SourceMode::Ros2:  return source.ros2_topic;
+    }
+    return {};
+}
+
 VisionPilotConfig load_vision_pilot_config(const std::string& path)
 {
     const auto kv = parse_conf(path);

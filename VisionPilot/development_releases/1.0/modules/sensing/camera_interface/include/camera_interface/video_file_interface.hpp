@@ -15,16 +15,11 @@ public:
     bool is_device_open() const override;
     std::tuple<bool, cv::Mat> get_latest_frame() override;
     std::vector<std::string> get_overlay() const override;
-    bool is_finished() const override;
-    bool take_rewind() override;
-    std::string source_label() const override;
 
 private:
     std::string path_;
     bool loop_;
     bool realtime_;
-    bool finished_ = false;
-    bool rewind_pending_ = false;
     cv::VideoCapture cap_;
     std::chrono::duration<double> frame_period_{0};
 };

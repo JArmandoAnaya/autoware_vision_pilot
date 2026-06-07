@@ -45,3 +45,6 @@ VisionPilotConfig load_vision_pilot_config(const std::string& config_path);
 std::string resolve_vision_pilot_config_path(int argc, char** argv);
 
 SourceMode parse_source_mode(const std::string& value);
+
+// Short label for debug overlay (video / device path / ROS topic).
+std::string source_label(const SourceConfig& source);
