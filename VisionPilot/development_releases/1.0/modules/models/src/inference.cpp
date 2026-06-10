@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <utility>
 #include <vector>
 
 namespace visionpilot::models {
@@ -60,10 +61,10 @@ void LatencyStats::update(double pre_, double ad_, double as_, double asp_, doub
 
 void LatencyStats::print() const
 {
-    // AD/AS/ASp run concurrently on separate CUDA streams — individual CPU-side
-    // timers are meaningless. wall captures the real end-to-end latency.
-    VP_INFO("pre=%.1f ms  inference(parallel)=%.1f ms  wall=%.1f ms  %.0f fps",
-            pre, wall - pre, wall, wall > 0 ? 1000.0 / wall : 0.0);
+    const double total = pre + wall;
+    VP_INFO("Latency  pre=%.1f ms  AD=%.1f ms  AS=%.1f ms  ASp=%.1f ms  "
+            "parallel=%.1f ms  wall=%.1f ms  %.0f fps",
+            pre, ad, as, asp, wall, total, total > 0 ? 1000.0 / total : 0.0);
 }
 
 void LatencyStats::reset() { *this = {}; }
@@ -98,24 +99,27 @@ std::optional<InferenceFrameResult> InferencePipeline::process(const cv::Mat& pr
     if (frame_buf_count_ < 2) return std::nullopt;
 
     auto t0       = Clock::now();
-    auto prev_imn = chw_imagenet(prev_frame_);
-    auto curr_imn = chw_imagenet(curr_frame_);
-    auto curr_01  = chw_01(curr_frame_);
+    auto prev_imn    = chw_imagenet(prev_frame_);
+    auto curr_imn    = chw_imagenet(curr_frame_);
+    auto curr_01_as  = chw_01(curr_frame_);          // AutoSteer's private copy
+    auto curr_01_asp = curr_01_as;                   // AutoSpeed's private copy
     const double ms_pre = Ms(Clock::now() - t0).count();
 
     auto t_wall = Clock::now();
     auto f_drive = std::async(std::launch::async, [&] {
         auto t = Clock::now();
-        return std::make_pair(auto_drive_.infer(prev_imn.data(), curr_imn.data()),
-                              Ms(Clock::now() - t).count());
+        auto r = auto_drive_.infer(prev_imn.data(), curr_imn.data());
+        return std::make_pair(std::move(r), Ms(Clock::now() - t).count());
     });
     auto f_steer = std::async(std::launch::async, [&] {
         auto t = Clock::now();
-        return std::make_pair(auto_steer_.infer(curr_01.data()), Ms(Clock::now() - t).count());
+        auto r = auto_steer_.infer(curr_01_as.data());
+        return std::make_pair(std::move(r), Ms(Clock::now() - t).count());
     });
     auto f_speed = std::async(std::launch::async, [&] {
         auto t = Clock::now();
-        return std::make_pair(auto_speed_.infer(curr_01.data()), Ms(Clock::now() - t).count());
+        auto r = auto_speed_.infer(curr_01_asp.data());
+        return std::make_pair(std::move(r), Ms(Clock::now() - t).count());
     });
 
     auto [res_drive, ms_drive] = f_drive.get();
