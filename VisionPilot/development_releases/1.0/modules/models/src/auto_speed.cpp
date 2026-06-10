@@ -12,8 +12,9 @@ namespace visionpilot::models {
 
 AutoSpeed::AutoSpeed(engine::OnnxEngine& engine, const std::string& model_path)
     : session_(engine.create_session(model_path, "autospeed_"))
-    , mem_info_(Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault))
+    , mem_info_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault))
     , input_shape_{1, 3, NET_H, NET_W}
+    , arena_shrink_(engine.config().provider == "cpu" ? "cpu:0" : "cpu:0;gpu:0")
 {
     Ort::AllocatorWithDefaultOptions alloc;
     const size_t n_in  = session_->GetInputCount();
@@ -54,7 +55,7 @@ AutoSpeedOutput AutoSpeed::infer(
     std::vector<Ort::Value> results;
     try {
         Ort::RunOptions run_options;
-        run_options.AddConfigEntry(kOrtRunOptionsConfigEnableMemoryArenaShrinkage, "gpu:0");
+        run_options.AddConfigEntry(kOrtRunOptionsConfigEnableMemoryArenaShrinkage, arena_shrink_.c_str());
         results = session_->Run(
             run_options,
             in_names_.data(),  &input_tensor, 1,
