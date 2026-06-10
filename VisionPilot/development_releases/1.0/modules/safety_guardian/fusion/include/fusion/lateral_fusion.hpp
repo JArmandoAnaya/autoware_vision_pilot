@@ -46,8 +46,8 @@ struct LateralFusionEstimate {
 //
 //  Per-frame lateral pipeline:
 //    1. Project AutoSteer waypoints to world via H (matches video_visualization.py):
-//       xp is (2,64): row = lane boundary, col = fixed image row (y = linspace).
-//       u = xp[row,i] * 1024, v = image row i; mask with h_vector >= 0.5.
+//       xp is (1,64): col = fixed image row (y = linspace).
+//       u = xp[i] * 1024, v = image row i; mask with h_vector >= 0.5.
 //    2. 2nd-order polynomial RANSAC on world points:
 //         y_lateral = a·x² + b·x + c
 //       → CTE = c, Yaw = atan(b), Curvature = median κ(x) at waypoint x in [curv_x_min, curv_x_max]
