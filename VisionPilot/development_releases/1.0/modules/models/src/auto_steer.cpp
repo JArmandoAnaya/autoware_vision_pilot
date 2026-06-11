@@ -9,8 +9,9 @@ namespace visionpilot::models {
 
 AutoSteer::AutoSteer(engine::OnnxEngine& engine, const std::string& model_path)
     : session_(engine.create_session(model_path, "autosteer_"))
-    , mem_info_(Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault))
+    , mem_info_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault))
     , input_shape_{1, 3, NET_H, NET_W}
+    , arena_shrink_(engine.config().provider == "cpu" ? "cpu:0" : "cpu:0;gpu:0")
 {
     Ort::AllocatorWithDefaultOptions alloc;
     const size_t n_in  = session_->GetInputCount();
@@ -24,7 +25,7 @@ AutoSteer::AutoSteer(engine::OnnxEngine& engine, const std::string& model_path)
         printf("[AutoSteer] input[%zu]  = %s\n", i, in_names_[i]);
     }
 
-    // Expect two outputs: xp [1, 2, 64] and h_vector [1, 2, 64]
+    // Expect two outputs: xp [1, 1, 64, 1] and h_vector [1, 1, 64, 1]
     out_name_strs_.resize(n_out);
     out_names_.resize(n_out);
     for (size_t i = 0; i < n_out; ++i) {
@@ -49,7 +50,7 @@ AutoSteerOutput AutoSteer::infer(const float* image_chw)
     std::vector<Ort::Value> results;
     try {
         Ort::RunOptions run_options;
-        run_options.AddConfigEntry(kOrtRunOptionsConfigEnableMemoryArenaShrinkage, "gpu:0");
+        run_options.AddConfigEntry(kOrtRunOptionsConfigEnableMemoryArenaShrinkage, arena_shrink_.c_str());
         results = session_->Run(
             run_options,
             in_names_.data(),  &input_tensor, 1,
@@ -64,12 +65,12 @@ AutoSteerOutput AutoSteer::infer(const float* image_chw)
         return out;
     }
 
-    // Output 0 — xp  [1, 2, 64] → 128 floats
+    // Output 0 — xp [1, 1, 64, 1] → 64 floats
     std::memcpy(out.xp.data(),
                 results[0].GetTensorData<float>(),
                 out.xp.size() * sizeof(float));
 
-    // Output 1 — h_vector [1, 2, 64] → 128 floats
+    // Output 1 — h_vector [1, 1, 64, 1] → 64 floats
     std::memcpy(out.h_vector.data(),
                 results[1].GetTensorData<float>(),
                 out.h_vector.size() * sizeof(float));

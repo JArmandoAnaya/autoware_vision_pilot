@@ -215,14 +215,12 @@ LateralFusionEstimate LateralFusion::update(
 //
 //  Matches Models/visualizations/AutoSteer/video_visualization.py:
 //    yp[i] = linspace(0, NET_H-1, 64)
-//    u = xp[row, i] * NET_W  (masked by h_vector[row, i] >= 0.5)
-//  For RANSAC we use the midpoint of row 0 and row 1 at each y (ego centerline).
+//    u = xp[i] * NET_W  (masked by h_vector[i] >= 0.5)
 //
 std::vector<LateralFusion::WorldPt>
 LateralFusion::project_waypoints(const models::AutoSteerOutput& steer) const
 {
     static constexpr int N_WP  = 64;
-    static constexpr int N_ROW = 2;
     static constexpr float NET_W = 1024.f;
     static constexpr float NET_H = 512.f;
 
@@ -233,17 +231,9 @@ LateralFusion::project_waypoints(const models::AutoSteerOutput& steer) const
         const float v_px = (N_WP <= 1) ? 0.f
             : static_cast<float>(i) * (NET_H - 1.f) / static_cast<float>(N_WP - 1);
 
-        float u_sum = 0.f;
-        int   n     = 0;
-        for (int row = 0; row < N_ROW; ++row) {
-            const int idx = row * N_WP + i;
-            if (steer.h_vector[idx] < 0.5f) continue;
-            u_sum += steer.xp[idx] * NET_W;
-            ++n;
-        }
-        if (n == 0) continue;
+        if (steer.h_vector[i] < 0.5f) continue;
 
-        const float u_px = u_sum / static_cast<float>(n);
+        const float u_px = steer.xp[i] * NET_W;
         auto [xw, yw] = project_world(H_, u_px, v_px);
         // Keep points in a sensible forward range for the polynomial fit
         if (xw < 0.5f || xw > 120.f) continue;

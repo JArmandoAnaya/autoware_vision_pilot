@@ -11,12 +11,12 @@
 namespace visionpilot::models {
 
 // ─── Output ───────────────────────────────────────────────────────────────────
-// Both tensors are (2, 64) in the Python model, flattened row-major here:
-//   xp[row*64 + i]  = lateral x at fixed image row i (normalized [0,1], ×1024 for px)
+// Both tensors are (1, 64) in the ONNX model, flattened here:
+//   xp[i] = lateral x at fixed image row i (normalized [0,1], ×1024 for px)
 //   NOT (u,v) pairs — v comes from linspace(0, H-1, 64) in the visualizer.
 struct AutoSteerOutput {
-    std::array<float, 128> xp{};        // (2, 64) ego-path waypoints
-    std::array<float, 128> h_vector{};  // (2, 64) homography vectors
+    std::array<float, 64> xp{};        // (1, 64) ego-path waypoints
+    std::array<float, 64> h_vector{};  // (1, 64) waypoint confidence/mask
     bool                   valid = false;
 };
 
@@ -49,6 +49,7 @@ private:
     std::vector<const char*> out_names_;
 
     std::vector<int64_t> input_shape_;  // {1, 3, NET_H, NET_W}
+    std::string arena_shrink_;
 };
 
 }  // namespace visionpilot::models

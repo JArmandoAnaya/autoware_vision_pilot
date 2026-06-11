@@ -52,6 +52,7 @@ private:
     std::vector<const char*> out_names_;
 
     std::vector<int64_t> frame_shape_;  // {1, 3, NET_H, NET_W}
+    std::string arena_shrink_;           // arena devices to shrink per run
 };
 
 }  // namespace visionpilot::models
