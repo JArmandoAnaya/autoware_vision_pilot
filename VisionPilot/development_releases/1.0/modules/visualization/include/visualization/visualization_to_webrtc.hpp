@@ -1,8 +1,3 @@
-//
-// Created by atanasko on 1.5.26.
-// Developed by TranHuuNhatHuy on 18.5.26.
-//
-
 #ifndef VISIONPILOT_VISUALIZATION_TO_WEBRTC_H
 #define VISIONPILOT_VISUALIZATION_TO_WEBRTC_H
 
