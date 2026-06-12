@@ -9,7 +9,7 @@ VIDEO_PATH="/autoware/test/traffic-driving.mp4"
 MODEL_PATH="/autoware/model-weights/autospeed.onnx"
 PROVIDER="tensorrt"       # Execution provider: 'cpu' or 'tensorrt'
 PRECISION="fp32"     # Precision: 'fp32' or 'fp16' (for TensorRT)
-HOMOGRAPHY_YAML="/autoware/VisionPilot/Middleware_Recipes/Standalone/AutoSpeed/homography.yaml"
+HOMOGRAPHY_YAML="/autoware/homography.yaml"
 NUM_THREADS="4" # 0 means auto, number of inference threads, 1 thread for capture, 1 thread for display will be used aside from this
 
 # ===== ONNX Runtime Options =====

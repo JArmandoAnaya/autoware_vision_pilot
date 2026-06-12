@@ -4,22 +4,16 @@ Containerized AutoSpeed Demo, closest in-path object detection and tracking.
 
 ## Prerequisites
 
-- Download the [AutoSpeed ONNX model weights](https://drive.google.com/file/d/1Zhe8uXPbrPr8cvcwHkl1Hv0877HHbxbB/view?usp=drive_link) and place it in the `model-weights` directory with the name `autospeed.onnx`.
+- Download the [AutoSpeed ONNX model weights](https://drive.google.com/file/d/1Zhe8uXPbrPr8cvcwHkl1Hv0877HHbxbB/view?usp=drive_link) and place it in the `model-weights` directory with the name `autospeed.onnx` (or run `../download-assets.sh` to fetch all demo assets at once).
 
     ```bash
     mkdir -p model-weights
-    curl "https://drive.usercontent.google.com/download?id=1Zhe8uXPbrPr8cvcwHkl1Hv0877HHbxbB&confirm=xxx" -o model-weights/autospeed.onnx
+    curl -fL "https://drive.usercontent.google.com/download?id=1Zhe8uXPbrPr8cvcwHkl1Hv0877HHbxbB&confirm=xxx" -o model-weights/autospeed.onnx
     ```
 
-## Usage
+## Usage (GPU / TensorRT)
 
-```bash
-./launch-autospeed.sh
-```
-
-## GPU Usage (TensorRT)
-
-Running with GPU acceleration requires additional setup on the host before launching the container.
+This demo runs the AutoSpeed pipeline with the TensorRT execution provider and requires additional setup on the host before launching the container.
 
 ### Host Prerequisites
 
@@ -66,13 +60,22 @@ Running with GPU acceleration requires additional setup on the host before launc
    mkdir -p /root/trt_cache
    ```
 
-### Running with GPU
+### Running
 
 ```bash
-./launch_autospeed.sh
+./launch-autospeed.sh
 ```
 
 On first run, the TRT engine is built and cached (~30 seconds). Subsequent runs start immediately.
+
+If your host libraries live somewhere other than the default `/root/...` locations from the steps above, override them via environment variables:
+
+```bash
+ONNXRUNTIME_GPU_DIR=~/onnxruntime-linux-x64-gpu-1.22.0 \
+CUDA_LIB_DIR=~/cuda12-lib TENSORRT_LIB_DIR=~/tensorrt-libs \
+CUDNN_LIB_DIR=~/cudnn-lib TRT_CACHE_DIR=~/trt_cache \
+./launch-autospeed.sh
+```
 
 
 ## Output

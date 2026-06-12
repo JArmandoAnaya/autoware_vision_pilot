@@ -4,11 +4,11 @@ Containerized EgoLanes Demo, semantic segmentation of driving lanes.
 
 ## Prerequisites
 
-- Download the [EgoLanes PyTorch model weights](https://github.com/autowarefoundation/autoware.privately-owned-vehicles/tree/main/Models#egolanes---semantic-segmentation-of-driving-lanes) and place it in the `model-weights` directory with the name `egolanes.pth`.
+- Download the [EgoLanes PyTorch model weights](https://github.com/autowarefoundation/autoware.privately-owned-vehicles/tree/main/Models#egolanes---semantic-segmentation-of-driving-lanes) and place it in the `model-weights` directory with the name `egolanes.pth` (or run `../download-assets.sh` to fetch all demo assets at once).
 
     ```bash
     mkdir -p model-weights
-    curl "https://drive.usercontent.google.com/download?id=1Njo9EEc2tdU1ffo8AUQ9mjwuQ9CzSRPX&confirm=xxx" -o model-weights/egolanes.pth
+    curl -fL "https://drive.usercontent.google.com/download?id=1Njo9EEc2tdU1ffo8AUQ9mjwuQ9CzSRPX&confirm=xxx" -o model-weights/egolanes.pth
     ```
 
 ## Usage
@@ -53,5 +53,5 @@ Then open in your browser: `http://127.0.0.1:6080/vnc.html?resize=scale&autoconn
 
 Then run:
 ```bash
-./launch-egolanes.sh
+./launch-egolanes.sh --gpu
 ```

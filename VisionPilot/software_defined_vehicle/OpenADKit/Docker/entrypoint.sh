@@ -15,14 +15,6 @@ log() {
     echo -e "\033[32m[visualizer]\033[0m $1"
 }
 
-warn() {
-    echo -e "\033[33m[visualizer]\033[0m $1"
-}
-
-error() {
-    echo -e "\033[31m[visualizer]\033[0m $1"
-}
-
 configure_openbox() {
     mkdir -p /etc/xdg/openbox
 
@@ -83,11 +75,6 @@ start_vnc() {
         -depth "$VNC_DEPTH" \
         -localhost no \
         -SecurityTypes VncAuth
-
-    if [ $? -ne 0 ]; then
-        error "Failed to start VNC server"
-        exit 1
-    fi
     log "VNC server started on display $DISPLAY"
 }
 
@@ -100,11 +87,6 @@ start_novnc() {
         --key=/etc/ssl/private/novnc.key \
         6080 \
         localhost:5999
-
-    if [ $? -ne 0 ]; then
-        error "Failed to start NoVNC"
-        exit 1
-    fi
     log "NoVNC started on port 6080"
 }
 
@@ -115,10 +97,10 @@ print_access_info() {
     echo -e "\033[32m═══════════════════════════════════════════════════════════════════════\033[0m"
     echo ""
     echo -e "  \033[36mBrowser Access (NoVNC):\033[0m"
-    echo -e "    http://localhost:6080/vnc.html?resize=scale&autoconnect=true&password=${VNC_PASSWORD}"
+    echo -e "    http://127.0.0.1:6080/vnc.html?resize=scale&autoconnect=true&password=${VNC_PASSWORD}"
     echo ""
     echo -e "  \033[36mVNC Client Access:\033[0m"
-    echo -e "    localhost:5999"
+    echo -e "    127.0.0.1:5999"
     echo ""
     echo -e "  \033[36mPassword:\033[0m ${VNC_PASSWORD}"
     echo ""
