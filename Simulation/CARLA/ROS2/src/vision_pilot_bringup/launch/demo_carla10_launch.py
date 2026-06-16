@@ -1,80 +1,61 @@
 from launch import LaunchDescription
+from launch.actions import ExecuteProcess, SetEnvironmentVariable
 from launch_ros.actions import Node
 
 import os
-from launch.actions import ExecuteProcess
+
 
 def generate_launch_description():
-    install_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__))) 
+    # .../src/carla_bridge_bringup/launch/<this file>  ->  ROS2 workspace root
+    install_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     ws_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(install_dir))))
     script_path = os.path.abspath(os.path.join(ws_dir, 'ros_carla_config.py'))
-    
+    config_json = os.path.join(ws_dir, 'config', 'VisionPilot_carla10.json')
+
+    # The new VisionPilot driver is the single C++ binary built from VisionPilot/
+    # (perception -> fusion -> MPC -> control -> Ackermann). It is NOT a ROS2
+    # package, so point these at your build output and CARLA config:
+    #   export VISIONPILOT_BIN=/path/to/VisionPilot/build/VisionPilot
+    #   export VISIONPILOT_CONFIG=/path/to/vision_pilot.conf   (from
+    #       VisionPilot/config/vision_pilot_carla.conf.example)
+    vp_bin = os.environ.get('VISIONPILOT_BIN', 'VisionPilot')
+    vp_conf = os.environ.get('VISIONPILOT_CONFIG', 'config/vision_pilot.conf')
+
     return LaunchDescription([
+        # CARLA native ROS2 (Fast-DDS) defaults to shared-memory transport, which does
+        # not cross a host<->container boundary. Force UDP so camera data and the
+        # Ackermann command actually flow. The CARLA *server* must ALSO run with
+        # FASTDDS_BUILTIN_TRANSPORTS=UDPv4 (see ROS2/README.md).
+        SetEnvironmentVariable('FASTDDS_BUILTIN_TRANSPORTS', 'UDPv4'),
+
+        # 1) Spawn ego + sensors (main_cam with enable_for_ros, ros2_ackermann_control).
         ExecuteProcess(
-            cmd=['python3', script_path, '-f', os.path.join(ws_dir,'config/VisionPilot_carla10.json')],
+            cmd=['python3', script_path, '-f', config_json],
             output='screen'
         ),
-        
-        Node(
-            package='steering_controller',  
-            executable='steering_controller_node',
-            name='steering_controller_node',
+
+        # 2) VisionPilot single-binary driver: subscribes to the camera, publishes the
+        #    Ackermann command. Control lives inside the binary — there is no Python
+        #    steering/longitudinal/PATHFINDER/control-relay chain anymore.
+        ExecuteProcess(
+            cmd=[vp_bin, '--config', vp_conf],
             output='screen'
         ),
-        
-        Node(
-            package='longitudinal_controller',  
-            executable='longitudinal_controller_node',
-            name='longitudinal_controller_node',
-            output='screen'
-        ),
-        
-        Node(
-            package='carla_control_publisher',
-            executable='pub_carla_control',
-            name='pub_carla_control',
-            output='screen'
-        ),
-        
-        Node(
-            package='road_shape_publisher',
-            executable='road_shape_publisher_node',
-            name='road_shape_publisher_node',
-            output='screen'
-        ),
-        
-        Node(
-            package='PATHFINDER',
-            executable='pathfinder_node',
-            name='pathfinder_node',
-            output='screen'
-        ),
-        
+
+        # 3) Optional ego-odometry fallback (publishes /hero/odom) for when CARLA's
+        #    native odometry is unavailable — point control.vehicle_state_topic at it.
         Node(
             package='odom_publisher',
             executable='pub_odom_node',
             name='pub_odom_node',
             output='screen'
         ),
-        
+
+        # tf: ego base -> front camera frame.
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
             name='front_to_base_broadcaster',
-            arguments=[
-                "1.425", "0", "0",   # translation: x y z
-                "0", "0", "0",   # rotation in rpy (roll pitch yaw in radians)
-                "hero",           # parent frame
-                "hero_front"           # child frame
-            ]
-        ),
-        
-        Node(
-            package='rviz2',
-            executable='rviz2',
-            name='rviz2',
-            arguments=[
-                '-d', os.path.abspath(os.path.join(ws_dir, 'config', 'PathFinder.rviz'))
-            ]
+            arguments=["1.425", "0", "0", "0", "0", "0", "hero", "hero_front"]
         ),
     ])

@@ -194,11 +194,28 @@ class RoadShapePublisher(Node):
     def timer_callback(self):
         if not self.ego:
             return
-        waypoints = self.waypoints
 
         ego_tf = self.ego.get_transform()
         ego_loc = ego_tf.location
         ego_rot = ego_tf.rotation
+
+        # Build the route ahead by following the road from the ego's current waypoint,
+        # so the path tracks the ACTUAL road/curve the car is on regardless of CARLA
+        # map version. The original hard-coded road/lane-id route does not match
+        # Town10HD on CARLA 0.10, leaving the ego with no drivable path -> no curvature
+        # -> the car drives straight off the road.
+        waypoints = []
+        start_wp = self.map.get_waypoint(ego_loc, project_to_road=True)
+        if start_wp is not None:
+            cur = start_wp
+            for _ in range(int(40.0 / STEP_DISTANCE)):  # ~40 m look-ahead
+                waypoints.append(cur)
+                nxts = cur.next(STEP_DISTANCE)
+                if not nxts:
+                    break
+                cur = nxts[0]
+        if not waypoints:
+            waypoints = self.waypoints  # fallback to the static global route
         ego_yaw = math.radians(ego_rot.yaw)
         ego_pitch = -math.radians(ego_rot.pitch) # CARLA uses left-handed coordinate system
         ego_roll = math.radians(ego_rot.roll)
