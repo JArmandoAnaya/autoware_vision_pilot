@@ -3,7 +3,9 @@
 import argparse
 import json
 import logging
+import os
 import signal
+import time
 import carla
 
 import math
@@ -16,7 +18,18 @@ def _setup_vehicle(world, config):
 
     bp = bp_library.filter(config.get("type"))[0]
     bp.set_attribute("role_name", config.get("id"))
-    bp.set_attribute("ros_name", config.get("id")) 
+    bp.set_attribute("ros_name", config.get("id"))
+
+    # Apply any extra vehicle blueprint attributes from the config. This is how the ego
+    # opts into CARLA's native-ROS2 Ackermann control subscriber via
+    # "ros2_ackermann_control": true. Without it CARLA only exposes
+    # /carla/<ros_name>/vehicle_control_cmd (CarlaEgoVehicleControl) and silently ignores
+    # Ackermann messages, so the vehicle never moves.
+    for key, value in config.get("attributes", {}).items():
+        if not bp.has_attribute(str(key)):
+            logging.warning("Vehicle blueprint has no attribute '%s', skipping", key)
+            continue
+        bp.set_attribute(str(key), str(value).lower() if isinstance(value, bool) else str(value))
 
     print(map_.name)
     spawn_points = map_.get_spawn_points()
@@ -24,12 +37,54 @@ def _setup_vehicle(world, config):
         waypt = map_.get_waypoint(spawn_points[i].location)
         print ("Spawn Point {}: road {} lane {} section {}".format(i, waypt.road_id, waypt.lane_id, waypt.section_id))
     
-    if 'Town06' in map_.name:
+    import os
+    _idx = os.environ.get("CARLA_SPAWN_INDEX")
+    if _idx is not None:
+        spawn_pt = spawn_points[int(_idx)]
+        logging.info("using CARLA_SPAWN_INDEX=%s -> loc=(%.1f,%.1f)",
+                     _idx, spawn_pt.location.x, spawn_pt.location.y)
+    elif 'Town06' in map_.name:
         spawn_pt = spawn_points[102]
     else:
+        # Auto-select a CURVED LANE so the steering can actually be evaluated - a straight
+        # lane tells us nothing. Score each spawn by SMOOTH cumulative heading change over
+        # ~50 m along a SINGLE lane, EXCLUDING junctions (intersections fake huge heading
+        # jumps) and per-step jumps > 15 deg (branch/lane-change artifacts). On Town10HD
+        # this deterministically lands on the verified curved-lane spot (spawn idx 63,
+        # ~72 deg smooth bend) where EgoLanes detects clean lane lines.
         spawn_pt = spawn_points[5]
+        best_score = -1.0
+        for sp in spawn_points:
+            wp = map_.get_waypoint(sp.location, project_to_road=True)
+            if wp is None or wp.is_junction:
+                continue
+            cur, n, total_turn, prev_yaw, bad = wp, 0, 0.0, None, False
+            for _ in range(100):  # ~50 m at 0.5 m step
+                nxt = cur.next(0.5)
+                if not nxt:
+                    break
+                cur = nxt[0]
+                if cur.is_junction:   # stay on an open road, not a crossing
+                    break
+                n += 1
+                yaw = cur.transform.rotation.yaw
+                if prev_yaw is not None:
+                    d = abs((yaw - prev_yaw + 180.0) % 360.0 - 180.0)
+                    if d > 15.0:      # branch/lane-change artifact - reject this spawn
+                        bad = True
+                        break
+                    total_turn += d
+                prev_yaw = yaw
+            score = total_turn if (n >= 60 and not bad) else -1.0   # >= 30 m continuous curve
+            if score > best_score:
+                best_score, spawn_pt = score, sp
+        logging.info("auto-selected curved-lane spawn (%.0f deg smooth curvature ahead)", best_score)
 
-    return  world.spawn_actor(
+    # NOTE: CARLA UE5 0.10 Vehicle has no enable_for_ros() (sensors only), so the
+    # ego publishes no native odometry — VisionPilot reads ego_v=0. Odometry is
+    # supplied separately (see odom bridge) so the MPC gets cruise speed + lateral
+    # (cte/epsi) correction authority, not just curvature feed-forward.
+    return world.spawn_actor(
         bp,
         spawn_pt,
         attach_to=None)
@@ -128,11 +183,57 @@ def main(args):
         
         spectator = world.get_spectator()
 
+        # Hold the ego stationary until VisionPilot signals control is live. VisionPilot
+        # takes ~1 min to load its models / JIT the CUDA kernels; without this the
+        # uncommanded ego free-rolls during that window and VisionPilot inherits a
+        # mispositioned, moving car (drifts toward the road edge before the first
+        # command). We brake + hand_brake every tick until the readiness sentinel file
+        # (written by VisionPilot on its first control command, control.ready_sentinel_path)
+        # appears, then release. Set CARLA_VP_READY_SENTINEL="" to disable the hold.
+        ready_sentinel = os.environ.get("CARLA_VP_READY_SENTINEL", "/tmp/vp_ipc/vp_control_active")
+        try:
+            if ready_sentinel and os.path.exists(ready_sentinel):
+                os.remove(ready_sentinel)  # clear a stale signal from a previous run
+        except OSError:
+            pass
+        ego_released = not ready_sentinel  # empty path => no hold
+        if not ego_released:
+            logging.info("Holding ego (brake+hand_brake) until VisionPilot ready: %s", ready_sentinel)
+
         logging.info("Running...")
 
+        # Pace the synchronous loop to real time (fixed_delta_seconds). Without this the
+        # loop busy-ticks the server flat out, rendering every sensor on every tick with
+        # zero idle, which pins the GPU and can crash the render thread. sensor_tick on
+        # the cameras additionally caps their render rate independently of the tick rate.
+        dt = world.get_settings().fixed_delta_seconds or 0.05
+        last_log = 0.0
         while True:
+            loop_start = time.time()
             _follow_vehicle(world, vehicle, spectator)
+            # Startup hold: keep the ego still until VisionPilot's first command.
+            if not ego_released:
+                if os.path.exists(ready_sentinel):
+                    ego_released = True
+                    # Clear the hold so the native Ackermann controller takes over.
+                    vehicle.apply_control(carla.VehicleControl(hand_brake=False))
+                    logging.info("VisionPilot control active -> releasing ego hold")
+                else:
+                    vehicle.apply_control(
+                        carla.VehicleControl(throttle=0.0, brake=1.0, hand_brake=True))
             _ = world.tick()
+            if loop_start - last_log > 1.0:
+                last_log = loop_start
+                v = vehicle.get_velocity()
+                spd = math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+                ctl = vehicle.get_control()
+                loc = vehicle.get_location()
+                logging.info(
+                    "ego loc=(%.1f,%.1f,%.1f) speed=%.2f throttle=%.2f brake=%.2f steer=%.3f hb=%s",
+                    loc.x, loc.y, loc.z, spd, ctl.throttle, ctl.brake, ctl.steer, ctl.hand_brake)
+            elapsed = time.time() - loop_start
+            if elapsed < dt:
+                time.sleep(dt - elapsed)
 
     except KeyboardInterrupt:
         print('\nCancelled by user. Bye!')

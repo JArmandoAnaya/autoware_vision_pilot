@@ -1,0 +1,41 @@
+# VisionPilot — CARLA UE5 camera-only drive (ROS2 overlay of the agnostic config).
+#   cp config/vision_pilot_carla.conf.example config/vision_pilot.conf
+# Everything CARLA-specific is just the topics below. See
+# Simulation/CARLA/ROS2/README.md for the full flow.
+
+# ─── Input: CARLA native camera ──────────────────────────────────────────────
+source.mode             = ros2
+source.ros2_topic       = /carla/hero/main_cam/image
+
+# ─── Control / actuation ─────────────────────────────────────────────────────
+control.topic               = /carla/hero/ackermann_control_cmd   # AckermannDriveStamped out
+control.vehicle_state_topic = /carla/hero/odometry                # ego Odometry in
+control.max_speed_mps       = 8.0
+control.min_cruise_mps      = 0.0
+# Track speed only: forwarding the planner's per-bend deceleration to CARLA's
+# ackermann sink dead-stops the car at every turn (CARLA trait, not a VP default).
+control.track_speed_only    = true
+# Do NOT invert: the lateral controller already emits CARLA's sign (drift right ->
+# negative angle = left correction); inverting makes the feedback diverge.
+control.invert_steering     = false
+# Readiness handshake: VP writes this on its first command; the spawn helper holds
+# the ego until it appears. Mount its dir into the container.
+control.ready_sentinel_path = /tmp/vp_ipc/vp_control_active
+
+# ─── ONNX models (container paths; run.sh mounts host weights at /weights) ────
+models.autodrive_path = /weights/autodrive.onnx
+models.autosteer_path = /weights/autosteer_2.0.onnx
+models.autospeed_path = /weights/autospeed_2.onnx
+
+# GPU inference (image bakes ONNX Runtime 1.23.2 GPU); run with --gpus all.
+# CPU ORT starves the CARLA server (~2 fps).
+engine.provider     = cuda
+engine.precision    = fp32
+engine.device_id    = 0
+engine.cache_dir    = /tmp/visionpilot_trt_cache
+engine.workspace_gb = 1.0
+
+# Fusion tracker homography (model-view V: 1024×512 bbox → world)
+tracker.homography_path = config/V.yaml
+
+pipeline.initial_inference_check = true
