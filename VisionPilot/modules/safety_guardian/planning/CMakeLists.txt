@@ -3,6 +3,11 @@ cmake_minimum_required(VERSION 3.22.1)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(IPOPT REQUIRED ipopt)
 
+# Newer CppAD (e.g. 2024 on Ubuntu 24.04) moved some symbols such as
+# CppAD::local::temp_file() out of the headers into a compiled library; link
+# libcppad_lib when it is present (older CppAD is header-only and won't have it).
+find_library(CPPAD_LIB cppad_lib)
+
 # eigen-5.0.0
 add_subdirectory(src/eigen-5.0.0)
 
@@ -31,3 +36,7 @@ target_link_libraries(planning
         PRIVATE
         ${IPOPT_LIBRARIES}
 )
+
+if(CPPAD_LIB)
+    target_link_libraries(planning PRIVATE ${CPPAD_LIB})
+endif()

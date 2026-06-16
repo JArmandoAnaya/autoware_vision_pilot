@@ -23,3 +23,19 @@ engine.cache_dir    = /tmp/visionpilot_trt_cache
 engine.workspace_gb = 1.0
 
 pipeline.initial_inference_check = true
+
+# ─── Control / actuation (ROS2 drive path) ───────────────────────────────────
+# Build with -DENABLE_ROS2_INTERFACE=ON to enable the ROS2 control loop.
+# Topic names are middleware-agnostic — point them at whatever actuation sink
+# and ego-state source are in use. Defaults shown; override per deployment.
+# control.topic               = /control/ackermann_cmd   # ackermann_msgs/AckermannDriveStamped out
+# control.vehicle_state_topic = /vehicle/odometry        # nav_msgs/Odometry in (ego speed)
+# control.max_speed_mps       = 16.667                   # 60 km/h ceiling
+# control.min_cruise_mps      = 0.0
+# control.invert_steering     = false  # flip published steering sign (sink-specific)
+# control.track_speed_only    = false  # default: forward the planner's real
+#     acceleration (RSS / curve braking). Set true ONLY for sinks that dead-stop
+#     on the planner's deceleration (e.g. CARLA native --ros2) — a sink trait.
+#
+# Simulator/vehicle-specific overlays live in their own config, e.g. CARLA:
+#   config/vision_pilot_carla.conf.example

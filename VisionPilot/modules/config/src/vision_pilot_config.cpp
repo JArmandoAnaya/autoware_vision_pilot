@@ -44,7 +44,12 @@ std::map<std::string, std::string> parse_conf(const std::string& path)
         if (eq == std::string::npos)
             throw std::runtime_error(path + ":" + std::to_string(ln) + ": expected key=value");
         std::string key = trim(line.substr(0, eq));
-        std::string val = trim(line.substr(eq + 1));
+        std::string val = line.substr(eq + 1);
+        // Strip a trailing inline comment ("value  # note"). No config value
+        // contains '#', so cutting at the first one is safe and conventional.
+        const auto hash = val.find('#');
+        if (hash != std::string::npos) val.erase(hash);
+        val = trim(val);
         if (key.empty())
             throw std::runtime_error(path + ":" + std::to_string(ln) + ": empty key");
         kv[key] = val;
@@ -133,6 +138,19 @@ VisionPilotConfig load_vision_pilot_config(const std::string& path)
     cfg.pipeline.initial_inference_check = parse_bool(
         optional(kv, "pipeline.initial_inference_check", "true"),
         "pipeline.initial_inference_check");
+
+    cfg.control.topic = optional(kv, "control.topic", "/control/ackermann_cmd");
+    cfg.control.vehicle_state_topic =
+        optional(kv, "control.vehicle_state_topic", "/vehicle/odometry");
+    cfg.control.max_speed_mps =
+        parse_double(optional(kv, "control.max_speed_mps", "16.667"), "control.max_speed_mps");
+    cfg.control.min_cruise_mps =
+        parse_double(optional(kv, "control.min_cruise_mps", "0.0"), "control.min_cruise_mps");
+    cfg.control.invert_steering =
+        parse_bool(optional(kv, "control.invert_steering", "false"), "control.invert_steering");
+    cfg.control.track_speed_only =
+        parse_bool(optional(kv, "control.track_speed_only", "false"), "control.track_speed_only");
+    cfg.control.ready_sentinel_path = optional(kv, "control.ready_sentinel_path", "");
 
     { const std::string raw = optional(kv, "tracker.homography_path", "");
       cfg.homography_path = raw.empty() ? "" : expand_home(raw); }

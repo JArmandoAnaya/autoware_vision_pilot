@@ -112,13 +112,22 @@ CIPOFusionEstimate LongitudinalFusion::update(
     }
 
     // ── Step 3: AutoDrive distance ────────────────────────────────────────────
+    // Gate on the model's CIPO probability: AutoDrive always regresses a distance,
+    // but only when flag_prob says a lead is actually present is that distance a
+    // real lead. Otherwise (free road, or a curve where the distance collapses
+    // toward the road geometry) it must NOT be fused as a CIPO — doing so
+    // fabricates a phantom close lead and trips a full-brake AEB.
     static constexpr float D_MAX = 150.f;
     Meas ad_meas;
-    if (autodrive.valid) {
+    if (autodrive.valid && autodrive.flag_prob >= cfg_.cipo_flag_threshold) {
         ad_meas.distance_m = D_MAX * (1.f - autodrive.dist_normalized);
         ad_meas.stddev_m   = cfg_.autodrive_noise_m;
         ad_meas.valid      = true;
     }
+
+    // A CIPO is present this frame only if the model flags a lead OR AutoSpeed
+    // actually detected an in-path bbox. This drives has_cipo for the planner.
+    const bool cipo_present = ad_meas.valid || cipo_raw.valid;
 
     // ── Step 4: Particle filter ───────────────────────────────────────────────
     const float dt = (dt_s > 1e-6f) ? dt_s : cfg_.dt_s;
@@ -176,7 +185,10 @@ CIPOFusionEstimate LongitudinalFusion::update(
         var_d += w[i] * dd * dd;
     }
 
-    est.valid             = true;
+    // has_cipo for the planner: only when a real lead is present this frame.
+    // The particle filter still smooths distance/velocity, but a stale tracked
+    // distance must not act as a lead once the model no longer flags one.
+    est.valid             = cipo_present;
     est.distance_m        = mean_d;
     est.velocity_ms       = mean_v;
     est.distance_stddev_m = std::sqrt(std::max(0.f, var_d));
@@ -193,7 +205,8 @@ CIPOFusionEstimate LongitudinalFusion::update(
         else
             std::snprintf(cr_buf, sizeof(cr_buf), "(none)");
 
-        VP_INFO("[Fusion] AD=%s | CIPO=%s%s | Fused=%.1f m  v=%.2f m/s  ±%.1f m",
+        VP_INFO("[Fusion] flag=%.2f%s | AD=%s | CIPO=%s%s | Fused=%.1f m  v=%.2f m/s  ±%.1f m",
+                autodrive.flag_prob, cipo_present ? "" : " (no-lead)",
                 ad_buf, cr_buf,
                 est.cut_in_detected ? " [CUT-IN]" : "",
                 est.distance_m, est.velocity_ms, est.distance_stddev_m);

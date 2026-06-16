@@ -9,3 +9,11 @@ target_include_directories(control
         PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+target_link_libraries(control
+        PUBLIC
+        planning
+        logging
+)
+
+target_compile_features(control PUBLIC cxx_std_17)

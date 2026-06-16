@@ -21,6 +21,41 @@ struct PipelineConfig {
     bool initial_inference_check = true;
 };
 
+// Control / actuation (ROS2 drive path). Topic names are middleware-agnostic
+// defaults — point them at whatever consumer is in use (a real vehicle, CARLA,
+// another simulator) via the config file. The speed envelope feeds the
+// longitudinal controller.
+struct ControlConfig {
+    std::string topic               = "/control/ackermann_cmd";
+    std::string vehicle_state_topic = "/vehicle/odometry";
+    double      max_speed_mps       = 60.0 / 3.6;  // 60 km/h
+    double      min_cruise_mps      = 0.0;
+
+    // Invert the published steering sign. VisionPilot uses the ROS/REP-103
+    // convention (+angle = left, matching +curvature = left). The official
+    // carla_ros_bridge negates the angle for CARLA (control.steer = -angle/max),
+    // but CARLA's NATIVE --ros2 ackermann path forwards it unchanged
+    // (control.steer = +angle => +angle turns RIGHT). So when publishing to the
+    // native path, set this true to restore the correct turn direction.
+    bool        invert_steering     = false;
+
+    // Publish a target speed only and forward zero acceleration, instead of the
+    // planner's computed acceleration. DEFAULT false = agnostic: forward the real
+    // acceleration so the planner's RSS following-distance / curve braking reaches
+    // the actuator. Set true only for sinks whose Ackermann speed-tracking would
+    // otherwise dead-stop the vehicle on the planner's deceleration (e.g. CARLA's
+    // native --ros2 controller); the steering then carries the turn and the speed
+    // floor (min_cruise_mps) keeps the vehicle moving.
+    bool        track_speed_only    = false;
+
+    // Optional readiness handshake. When non-empty, VisionPilot writes this file
+    // once, on its first valid control command — a signal that perception+control
+    // is live. Default empty = disabled (agnostic). External orchestration (e.g. a
+    // simulator spawn helper) can hold the vehicle stationary until this appears,
+    // so the actuator is not left uncommanded during model load / engine warm-up.
+    std::string ready_sentinel_path = "";
+};
+
 struct VisionPilotConfig {
     std::string       autodrive_model;
     std::string       autosteer_model;
@@ -28,6 +63,7 @@ struct VisionPilotConfig {
     vpe::EngineConfig engine_cfg;
     SourceConfig      source;
     PipelineConfig    pipeline;
+    ControlConfig     control;
     // Path to homography YAML — enables ObjectFinder tracker when non-empty.
     std::string       homography_path;
     // Print per-frame fusion debug logs

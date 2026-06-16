@@ -19,7 +19,12 @@ option(ENABLE_ROS2_INTERFACE "Enable ROS2 support" OFF)
 #find_package(cv_bridge REQUIRED)
 
 
-set(Python3_EXECUTABLE /usr/bin/python3.10 CACHE FILEPATH "" FORCE)
+# Interpreter used by the generate_config codegen (needs cv2 + numpy). Default to
+# the vp10 conda/system python3.10, but allow overriding via -DPython3_EXECUTABLE
+# (e.g. the containerized build on Ubuntu 24.04, which ships python3.12).
+if(NOT Python3_EXECUTABLE)
+    set(Python3_EXECUTABLE /usr/bin/python3.10 CACHE FILEPATH "" FORCE)
+endif()
 find_package(Python3 REQUIRED)
 
 # Preprocess C: your full-frame ground H (YAML) + fixed VisionPilot model V in script
@@ -46,6 +51,11 @@ add_subdirectory(modules/control)
 add_subdirectory(modules/sensing/image_preprocessing)
 
 if(ENABLE_ROS2_INTERFACE)
+    # eProsima Fast-CDR: a transitive dependency of the rosidl FastRTPS
+    # typesupport that the message packages pull in. It must be imported
+    # explicitly so the executable link step can resolve the `fastcdr` target.
+    find_package(fastcdr REQUIRED)
+
     add_subdirectory(modules/middleware_interfaces/ros2_interface/camera_subscriber)
     add_subdirectory(modules/middleware_interfaces/ros2_interface/control_cmd_publisher)
     add_subdirectory(modules/middleware_interfaces/ros2_interface/vehicle_state_subscriber)

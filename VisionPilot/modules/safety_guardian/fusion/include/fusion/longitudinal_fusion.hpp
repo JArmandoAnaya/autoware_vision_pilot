@@ -44,6 +44,12 @@ public:
         float process_noise_vel_ms = 0.20f;   // matches MRPT TRANSITION_MODEL_STD_VXY
         float autodrive_noise_m    = 15.f;
         float cipo_noise_m         = 5.f;
+        // AutoDrive emits a CIPO probability (flag_prob = sigmoid(flag_logit)):
+        // how confident the model is that a real lead object is present. Below
+        // this threshold the AutoDrive distance is NOT treated as a lead, so a
+        // free-road / curved-road scene (where the regressed distance collapses
+        // toward the road geometry) cannot fabricate a phantom CIPO and trip AEB.
+        float cipo_flag_threshold  = 0.5f;
         // Reinitialise filter when a reliable measurement jumps this far from
         // the particle cloud — handles genuine cut-in / cut-out events.
         float reset_gate_m         = 25.f;
