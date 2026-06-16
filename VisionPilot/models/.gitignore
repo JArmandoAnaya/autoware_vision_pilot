@@ -1,0 +1,5 @@
+# ONNX model weights are binary artifacts — never commit them.
+# Drop the CARLA drive weights here (mounted read-only at /weights in the GPU
+# container): autodrive.onnx, autosteer_2.0.onnx, autospeed_2.onnx
+*.onnx
+!.gitignore
