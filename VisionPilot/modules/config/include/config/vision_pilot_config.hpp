@@ -21,6 +21,15 @@ struct PipelineConfig {
     bool initial_inference_check = true;
 };
 
+// Optional perception -> planner -> control drive loop. Off by default (pure perception +
+// display). ego_speed_mps is a placeholder constant until the ROS2 vehicle-state input lands;
+// dt_s is the control period used for steering/accel shaping.
+struct ControlConfig {
+    bool        enabled       = false;
+    double      ego_speed_mps = 10.0;
+    double      dt_s          = 0.10;
+};
+
 struct VisionPilotConfig {
     std::string       autodrive_model;
     std::string       autosteer_model;
@@ -32,6 +41,7 @@ struct VisionPilotConfig {
     bool              fusion_debug   = false;
     // Directory with wheel_white.png / wheel_green.png for steering HUD
     std::string       wheel_dir;
+    ControlConfig     control;
 };
 
 // Load from key=value .conf file. Expands ~ to $HOME.

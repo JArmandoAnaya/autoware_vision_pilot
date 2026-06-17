@@ -1,5 +1,7 @@
-// VisionPilot — preprocess → inference → fusion → display
+// VisionPilot - preprocess -> inference -> fusion -> display (+ optional control)
 #include <config/vision_pilot_config.hpp>
+#include <control/control_bridge.hpp>
+#include <control/control_command.hpp>
 #include <debug/debug_draw.hpp>
 #include <engine/onnx_engine.hpp>
 #include <image_preprocessing/image_preprocessor.hpp>
@@ -67,6 +69,9 @@ int main(int argc, char** argv)
     const std::string label = source_label(cfg.source);
     cv::Mat frame, warped, resized;
 
+    // ── 4b. Control (optional, off by default) ───────────────────────────────
+    ControlBridge control_bridge;
+
     // ── 5. Main loop ────────────────────────────────────────────────────────
     while (true) {
         auto [ok, frame] = source->get_latest_frame();
@@ -82,6 +87,17 @@ int main(int argc, char** argv)
             pipeline.latency().print();
             vd::annotate_frame(warped, vd::debug_view_from(
                 *r, label, cfg.wheel_dir));
+
+            if (cfg.control.enabled && r->lateral.valid) {
+                // The bridge (modules/control) owns the planner + controllers; the app just
+                // hands it the fusion fields. ego_v is the configured constant here; the live
+                // vehicle-odometry override and the actuation publish are the ROS2 layer (PR3).
+                const double ego_v = cfg.control.ego_speed_mps;
+                const ControlCommand cmd = control_bridge.compute(
+                    r->lateral.cte_m, r->lateral.yaw_rad, r->lateral.curvature, r->cipo.valid,
+                    r->cipo.velocity_ms, r->cipo.distance_m, ego_v, cfg.control.dt_s);
+                (void)cmd;  // consumed by the ROS2 actuation adapter (PR3)
+            }
         }
 
         if (show_window) visualization::render_frame(warped, "VisionPilot", {});
