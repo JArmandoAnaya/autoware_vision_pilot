@@ -20,8 +20,8 @@ target_link_libraries(VisionPilot
     engine           # OnnxEngine
     models           # AutoDrive, AutoSteer, AutoSpeed
     fusion           # LongitudinalFusion, LateralFusion
-    control          # ControlCommand
-    control_bridge   # ControlBridge — the single control entry point (+ planning)
+    planning         # Planner (compute_plan)
+    control          # ControlCommand, Controller
     vp_debug         # annotate_frame, DebugView
     can_interface
     camera_interface

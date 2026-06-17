@@ -1,9 +1,9 @@
 // Phase 6 — deterministic closed-loop SIL validation harness.
 //
 // Closes the loop around the REAL control stack (Planner/MPC + the longitudinal/lateral
-// shaping controllers, composed exactly as ControlBridge::compute does) against an
-// independent kinematic plant. No weights, no sim, no ROS2 — a plain executable like
-// test_control / test_planning.
+// shaping controllers, composed exactly as the app drive loop does:
+// Planner::compute_plan -> Controller::compute) against an independent kinematic plant.
+// No weights, no sim, no ROS2 — a plain executable like test_control / test_planning.
 //
 // The plant integrates the FULL nonlinear Frenet (road-relative) kinematics:
 //     cte_dot  = v * sin(epsi)
@@ -48,7 +48,8 @@ bool approx(double a, double b, double tol)
   return std::fabs(a - b) <= tol;
 }
 
-// Compose the real control stack exactly like modules/control/src/control_bridge.cpp.
+// Compose the real control stack exactly like the app drive loop
+// (Planner::compute_plan -> Controller::compute, app/vision_pilot.cpp).
 ControlCommand step_control(
   Planner & planner, LongitudinalController & lon, LateralController & lat, double cte, double epsi,
   double kappa, double ego_v, bool has_cipo, double cipo_v, double cipo_distance, double dt)

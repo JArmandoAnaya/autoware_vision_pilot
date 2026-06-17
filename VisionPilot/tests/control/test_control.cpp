@@ -1,5 +1,6 @@
 // Deterministic unit + closed-loop tests for the control module. No weights, no sim.
 #include <control/control_command.hpp>
+#include <control/controller.hpp>
 #include <control/lateral_control.hpp>
 #include <control/longitudinal_control.hpp>
 
@@ -145,6 +146,63 @@ void test_lateral_closed_loop()
   check("lat closed-loop: no divergence", max_abs_y <= 1.0 + 1e-6);
 }
 
+// ---- Controller facade tests ------------------------------------------------
+// The facade is the control module's single entry point (the app calls it after the planner).
+// It was previously covered only transitively via the deleted ControlBridge; cover it directly.
+
+void test_controller_facade()
+{
+  {  // Routing equivalence: the facade must produce exactly what the two sub-controllers
+     // produce when driven directly with the same per-step inputs (bit-exact, same ops).
+    Controller ctrl;
+    LongitudinalController lon;
+    LateralController lat;
+    const double dt = 0.1;
+    bool match = true;
+    for (int i = 0; i < 50; ++i) {
+      const double steer = 0.3 * std::sin(0.1 * i);
+      const double accel = (i % 7 < 3) ? 1.0 : -0.8;
+      const double ego_v = 10.0 + 2.0 * std::sin(0.05 * i);
+      const ControlCommand cmd = ctrl.compute(steer, accel, ego_v, dt);
+      auto [v_ref, a_ref] = lon.compute(accel, ego_v, dt);
+      const double s_ref = lat.compute(steer, dt);
+      if (!(approx(cmd.steering_angle_rad, s_ref, 0.0) && approx(cmd.speed_mps, v_ref, 0.0) &&
+            approx(cmd.acceleration_mps2, a_ref, 0.0)))
+        match = false;
+    }
+    check("facade: routes steer+accel == direct sub-controllers (bit-exact)", match);
+  }
+  {  // reset() clears state: after building up slew + jerk state, the next step must match
+     // a fresh facade's first step.
+    Controller used;
+    for (int i = 0; i < 20; ++i) used.compute(0.5, 1.5, 12.0, 0.1);
+    used.reset();
+    Controller fresh;
+    const ControlCommand a = used.compute(0.2, 0.5, 10.0, 0.1);
+    const ControlCommand b = fresh.compute(0.2, 0.5, 10.0, 0.1);
+    check(
+      "facade: reset() restores fresh state",
+      approx(a.steering_angle_rad, b.steering_angle_rad, 1e-12) &&
+        approx(a.speed_mps, b.speed_mps, 1e-12) &&
+        approx(a.acceleration_mps2, b.acceleration_mps2, 1e-12));
+  }
+  {  // Config ctor: a tightened envelope is honored by the emitted command.
+    LongitudinalController::Config lon_cfg;
+    lon_cfg.max_speed_mps = 8.0;
+    const LateralController::Config lat_cfg;  // physical steer limit (default)
+    Controller ctrl(lon_cfg, lat_cfg);
+    bool honored = true;
+    double v = 0.0;
+    for (int i = 0; i < 300; ++i) {
+      const ControlCommand cmd = ctrl.compute(2.0, 5.0, v, 0.1);  // over-limit steer + accel
+      v = cmd.speed_mps;                                          // point-mass feedback
+      if (cmd.speed_mps > 8.0 + 1e-9) honored = false;
+      if (std::fabs(cmd.steering_angle_rad) > lat_cfg.max_steer_rad + 1e-9) honored = false;
+    }
+    check("facade: config ctor envelope honored", honored && approx(v, 8.0, 1e-6));
+  }
+}
+
 }  // namespace
 
 int main()
@@ -153,6 +211,7 @@ int main()
   test_lateral_unit();
   test_longitudinal_closed_loop();
   test_lateral_closed_loop();
+  test_controller_facade();
   std::printf(
     "\n%s (%d failure%s)\n", g_failures ? "FAILED" : "ALL PASS", g_failures,
     g_failures == 1 ? "" : "s");

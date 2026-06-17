@@ -1,9 +1,11 @@
-// Smoke test for the perception -> planner -> control bridge: representative inputs must
-// yield a finite ControlCommand inside the controllers' physical envelopes.
-#include <control/control_bridge.hpp>
+// Smoke test for the app's perception -> planner -> Controller drive step: representative inputs
+// must yield a finite ControlCommand inside the controllers' physical envelopes.
+#include <control/controller.hpp>
 #include <control/lateral_control.hpp>
 #include <control/longitudinal_control.hpp>
+#include <planning/planning.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -29,13 +31,19 @@ bool in_envelope(const ControlCommand& c)
            c.acceleration_mps2 >= lc.a_min - 1e-9 && c.acceleration_mps2 <= lc.a_max + 1e-9;
 }
 
-// Fresh bridge per scenario (planner/jerk/slew state must not leak between cases).
-// cipo_v is the lead's absolute speed; the bridge takes the closing rate (cipo_v - ego_v).
+// Fresh planner + controller per scenario (planner/jerk/slew state must not leak between cases).
+// cipo_v is the lead's absolute speed; mirror the app drive loop: clamp it >= 0 and use the
+// free-road sentinel distance when there is no lead.
 ControlCommand eval(double cte, double epsi, double kappa, double ego_v, bool has_cipo,
                     double cipo_v, double cipo_distance)
 {
-    ControlBridge bridge;
-    return bridge.compute(cte, epsi, kappa, has_cipo, cipo_v - ego_v, cipo_distance, ego_v, 0.1);
+    Planner planner;
+    Controller controller;
+    const double cv = has_cipo ? std::max(0.0, cipo_v) : ego_v;
+    const double cd = has_cipo ? cipo_distance : 9999.0;
+    auto [accel, steer_seq] = planner.compute_plan(cte, epsi, kappa, ego_v, has_cipo, cv, cd);
+    const double steer = steer_seq.empty() ? 0.0 : steer_seq.front();
+    return controller.compute(steer, accel, ego_v, 0.1);
 }
 
 }  // namespace

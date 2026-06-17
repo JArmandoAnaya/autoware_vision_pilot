@@ -19,12 +19,11 @@ read/write is the **sensing** module's concern, not control's, and Standalone do
 - **`LateralController`** — shapes the MPC steering angle (clamp → slew → low-pass). A
   shaping/actuation layer, **not** a second path-tracker: the MPC owns the steering law,
   and `max_steer_rad` is the vehicle's physical limit, not a control gain.
-- **`Controller`** (`controller.hpp`) — facade over the two controllers: given the planner's
-  steering angle + acceleration, routes them to the lateral/longitudinal controllers and
-  returns the shaped `ControlCommand`.
-- **`ControlBridge`** (`control_bridge.{hpp,cpp}`) — integration glue owning the Planner +
-  `Controller`, so the app computes a full drive step (perception error → `ControlCommand`)
-  in one call.
+- **`Controller`** (`controller.{hpp,cpp}`) — the module's entry point: a facade over the two
+  controllers that is **given** the planner's steering angle + acceleration, routes them to the
+  lateral/longitudinal controllers, and returns the shaped `ControlCommand`. It does **not** run
+  the planner — the control module stays planning-free. The app owns the `Planner::compute_plan`
+  call and hands its outputs to `Controller::compute(steer, accel, ego_v, dt)`.
 
 ## Actuation output (where the `ControlCommand` goes)
 
@@ -44,7 +43,8 @@ publisher/subscriber module READMEs.
 
 Build the target and run the binary; each prints `PASS`/`FAIL` and exits non-zero on failure.
 
-- `test_control` — unit + closed-loop kinematic tests for the two controllers.
+- `test_control` — unit + closed-loop kinematic tests for the two controllers, plus a
+  `Controller`-facade test (routing equivalence, `reset()`, config ctor).
 - `test_closed_loop` — **closed-loop SIL harness**: the real stack
   (`compute_plan`→longitudinal→lateral) driven around an independent kinematic plant on a
   straight + an R=50 m curve; asserts a sign-convention check, bounded CTE, and speed tracking.

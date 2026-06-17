@@ -1,12 +1,13 @@
 // VisionPilot - preprocess -> inference -> fusion -> display (+ optional control)
 #include <config/vision_pilot_config.hpp>
-#include <control/control_bridge.hpp>
 #include <control/control_command.hpp>
+#include <control/controller.hpp>
 #include <debug/debug_draw.hpp>
 #include <engine/onnx_engine.hpp>
 #include <image_preprocessing/image_preprocessor.hpp>
 #include <logging/logger.hpp>
 #include <models/inference.hpp>
+#include <planning/planning.hpp>
 #include <visualization/visualization.hpp>
 
 #include <camera_interface/frame_source.hpp>
@@ -14,6 +15,7 @@
 #include <visualization/visualization_to_webrtc.hpp>
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -70,7 +72,10 @@ int main(int argc, char** argv)
     cv::Mat frame, warped, resized;
 
     // ── 4b. Control (optional, off by default) ───────────────────────────────
-    ControlBridge control_bridge;
+    // The Planner (safety_guardian) owns the control law; the Controller (modules/control)
+    // shapes its steering-angle + acceleration intent for actuation. The app wires them.
+    Planner planner;
+    Controller controller;
 
     // ── 5. Main loop ────────────────────────────────────────────────────────
     while (true) {
@@ -89,13 +94,22 @@ int main(int argc, char** argv)
                 *r, label, cfg.wheel_dir));
 
             if (cfg.control.enabled && r->lateral.valid) {
-                // The bridge (modules/control) owns the planner + controllers; the app just
-                // hands it the fusion fields. ego_v is the configured constant here; the live
-                // vehicle-odometry override and the actuation publish are the ROS2 layer (PR3).
+                // ego_v is the configured constant here; the live vehicle-odometry override and
+                // the actuation publish are the ROS2 layer (PR3).
                 const double ego_v = cfg.control.ego_speed_mps;
-                const ControlCommand cmd = control_bridge.compute(
-                    r->lateral.cte_m, r->lateral.yaw_rad, r->lateral.curvature, r->cipo.valid,
-                    r->cipo.velocity_ms, r->cipo.distance_m, ego_v, cfg.control.dt_s);
+                // Lead absolute speed = ego + closing rate, clamped >= 0 so estimator noise near a
+                // stopped lead never feeds the planner a negative speed; far sentinel when no lead.
+                const bool has_cipo = r->cipo.valid;
+                const double cipo_v = has_cipo ? std::max(0.0, ego_v + r->cipo.velocity_ms) : ego_v;
+                const double cipo_distance = has_cipo ? r->cipo.distance_m : 9999.0;
+                // Planner (safety_guardian) owns the control law; the Controller shapes its
+                // steering-angle + acceleration intent into the actuation command.
+                auto [accel, steer_seq] = planner.compute_plan(
+                    r->lateral.cte_m, r->lateral.yaw_rad, r->lateral.curvature, ego_v, has_cipo,
+                    cipo_v, cipo_distance);
+                const double planner_steer = steer_seq.empty() ? 0.0 : steer_seq.front();
+                const ControlCommand cmd =
+                    controller.compute(planner_steer, accel, ego_v, cfg.control.dt_s);
                 // The app owns the logging cadence; the control library stays silent.
                 VP_INFO(
                     "[Control] steer=%.4f rad  speed=%.2f m/s  accel=%.2f m/s2",
