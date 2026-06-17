@@ -19,8 +19,11 @@ option(ENABLE_ROS2_INTERFACE "Enable ROS2 support" OFF)
 #find_package(cv_bridge REQUIRED)
 
 
-set(Python3_EXECUTABLE /usr/bin/python3.10 CACHE FILEPATH "" FORCE)
-find_package(Python3 REQUIRED)
+# Interpreter for the homography codegen (generate_config target below). It needs
+# numpy + opencv (cv2). Let CMake discover it from PATH/CMAKE_PREFIX_PATH so the build
+# is portable across distros (apt python3, conda env, venv). Override explicitly with
+# -DPython3_EXECUTABLE=/path/to/python when the default lacks cv2/numpy.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # Preprocess C: your full-frame ground H (YAML) + fixed VisionPilot model V in script
 set(VISIONPILOT_GROUND_HOMOGRAPHY "" CACHE FILEPATH "Full-frame ground H YAML (pixel -> world)")
