@@ -144,6 +144,13 @@ VisionPilotConfig load_vision_pilot_config(const std::string& path)
         parse_double(optional(kv, "control.ego_speed_mps", "10.0"), "control.ego_speed_mps");
     cfg.control.dt_s = parse_double(optional(kv, "control.dt_s", "0.1"), "control.dt_s");
 
+    // Validate control numerics: dt_s drives jerk/slew step bounds (a non-positive dt makes the
+    // std::clamp limits lo>hi, which is UB); ego_speed_mps is a physical speed.
+    if (cfg.control.dt_s <= 0.0)
+        throw std::runtime_error("control.dt_s must be > 0");
+    if (cfg.control.ego_speed_mps < 0.0)
+        throw std::runtime_error("control.ego_speed_mps must be >= 0");
+
     // Validate file paths
     if (cfg.source.mode == SourceMode::Video) {
         if (cfg.source.video_path.empty())
