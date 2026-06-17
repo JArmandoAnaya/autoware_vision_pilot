@@ -35,3 +35,6 @@ control.dt_s          = 0.1
 # ControlCommand is published as ackermann_msgs/AckermannDriveStamped.
 control.topic         = /control/ackermann_cmd
 control.frame_id      = base_link
+# ROS2 vehicle-state input (same build flag): nav_msgs/Odometry topic giving the live
+# ego speed. Until a message arrives, control.ego_speed_mps above is used as fallback.
+control.vehicle_state_topic = /vehicle/odometry

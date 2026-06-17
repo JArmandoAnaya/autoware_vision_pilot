@@ -45,10 +45,11 @@ ros_prelude='. /opt/ros/jazzy/setup.sh && cd /autoware/VisionPilot'
 
 case "${MODE}" in
     smoke)
-        # Real runtime proof of the publisher: publishes a known ControlCommand and reads
-        # it back through a subscriber in one process. No weights / camera required.
+        # Real runtime proof of the ROS2 adapters in one process, no weights / camera:
+        #  - control_cmd_publisher: publish a ControlCommand, read it back as Ackermann.
+        #  - vehicle_state_subscriber: publish an Odometry, read back the ego speed.
         docker run "${DOCKER_ARGS[@]}" "${IMAGE}" \
-            bash -lc "${ros_prelude} && ./build/test_control_cmd_publisher"
+            bash -lc "${ros_prelude} && ./build/test_control_cmd_publisher && ./build/test_vehicle_state_subscriber"
         ;;
     echo)
         docker run -it "${DOCKER_ARGS[@]}" "${IMAGE}" \

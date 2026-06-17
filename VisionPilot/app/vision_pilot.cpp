@@ -16,6 +16,7 @@
 #include <camera_interface/frame_source.hpp>
 #ifdef ENABLE_ROS2_INTERFACE
 #include <control_cmd_publisher/cmd_to_ros2.hpp>
+#include <vehicle_state_subscriber/ros2_to_can.hpp>
 #endif
 #ifdef ENABLE_WEBRTC
 #include <visualization/visualization_to_webrtc.hpp>
@@ -83,9 +84,12 @@ int main(int argc, char** argv)
     LateralController lat_ctrl;
 #ifdef ENABLE_ROS2_INTERFACE
     std::unique_ptr<control_cmd_publisher::ControlCmdPublisher> control_pub;
+    std::unique_ptr<vehicle_state_subscriber::VehicleStateSubscriber> vehicle_state;
     if (cfg.control.enabled) {
         control_pub = std::make_unique<control_cmd_publisher::ControlCmdPublisher>(
             cfg.control.topic, cfg.control.frame_id);
+        vehicle_state = std::make_unique<vehicle_state_subscriber::VehicleStateSubscriber>(
+            cfg.control.vehicle_state_topic);
     }
 #endif
 
@@ -109,8 +113,16 @@ int main(int argc, char** argv)
                 // cte/epsi/kappa come straight from lateral fusion (the signed model-view
                 // world frame the MPC expects). velocity_ms is the closing rate (negative
                 // = approaching), so the lead's absolute speed is ego_v + velocity_ms.
-                // ego_v is a placeholder until vehicle-state input (Phase 5).
+                // ego_v: live ego speed from vehicle odometry when available (Phase 5),
+                // falling back to the configured constant until the first message arrives.
+#ifdef ENABLE_ROS2_INTERFACE
+                double ego_v = cfg.control.ego_speed_mps;
+                if (vehicle_state && vehicle_state->has_state()) {
+                    ego_v = vehicle_state->ego_speed_mps();
+                }
+#else
                 const double ego_v = cfg.control.ego_speed_mps;
+#endif
                 const bool has_cipo = r->cipo.valid;
                 const double cipo_v = has_cipo ? ego_v + r->cipo.velocity_ms : ego_v;
                 const double cipo_distance = has_cipo ? r->cipo.distance_m : 9999.0;

@@ -32,6 +32,9 @@ struct ControlConfig {
     // as ackermann_msgs/AckermannDriveStamped on `topic`, stamped with `frame_id`.
     std::string topic         = "/control/ackermann_cmd";
     std::string frame_id      = "base_link";
+    // ROS2 vehicle-state input (ENABLE_ROS2_INTERFACE only): nav_msgs/Odometry topic whose
+    // twist gives the live ego speed (Phase 5). ego_speed_mps is the fallback until it arrives.
+    std::string vehicle_state_topic = "/vehicle/odometry";
 };
 
 struct VisionPilotConfig {

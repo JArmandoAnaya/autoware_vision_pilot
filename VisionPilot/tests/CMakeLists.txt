@@ -7,4 +7,5 @@ add_subdirectory(safety_guardian/planning)
 
 if(ENABLE_ROS2_INTERFACE)
     add_subdirectory(middleware_interfaces/ros2_interface/control_cmd_publisher)
+    add_subdirectory(middleware_interfaces/ros2_interface/vehicle_state_subscriber)
 endif()

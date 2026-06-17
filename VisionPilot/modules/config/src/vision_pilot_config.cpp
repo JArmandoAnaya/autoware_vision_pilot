@@ -148,6 +148,8 @@ VisionPilotConfig load_vision_pilot_config(const std::string& path)
     cfg.control.dt_s = parse_double(optional(kv, "control.dt_s", "0.1"), "control.dt_s");
     cfg.control.topic = optional(kv, "control.topic", "/control/ackermann_cmd");
     cfg.control.frame_id = optional(kv, "control.frame_id", "base_link");
+    cfg.control.vehicle_state_topic =
+        optional(kv, "control.vehicle_state_topic", "/vehicle/odometry");
 
     // Validate file paths
     if (cfg.source.mode == SourceMode::Video) {
