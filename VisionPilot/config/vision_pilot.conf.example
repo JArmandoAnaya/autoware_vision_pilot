@@ -23,3 +23,11 @@ engine.cache_dir    = /tmp/visionpilot_trt_cache
 engine.workspace_gb = 1.0
 
 pipeline.initial_inference_check = true
+
+# ─── Control (optional) ──────────────────────────────────────────────────────
+# Off by default: when disabled the app is pure perception + display. When enabled
+# it logs a ControlCommand each frame. ego_speed_mps is a placeholder until the
+# vehicle-state input lands; dt_s is the control period for steering/accel shaping.
+control.enabled       = false
+control.ego_speed_mps = 10.0
+control.dt_s          = 0.1

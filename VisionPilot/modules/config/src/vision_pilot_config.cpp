@@ -142,6 +142,11 @@ VisionPilotConfig load_vision_pilot_config(const std::string& path)
     { const std::string raw = optional(kv, "debug.wheel_dir", "");
       cfg.wheel_dir = raw.empty() ? "" : expand_home(raw); }
 
+    cfg.control.enabled = parse_bool(optional(kv, "control.enabled", "false"), "control.enabled");
+    cfg.control.ego_speed_mps =
+        parse_double(optional(kv, "control.ego_speed_mps", "10.0"), "control.ego_speed_mps");
+    cfg.control.dt_s = parse_double(optional(kv, "control.dt_s", "0.1"), "control.dt_s");
+
     // Validate file paths
     if (cfg.source.mode == SourceMode::Video) {
         if (cfg.source.video_path.empty())

@@ -1,10 +1,16 @@
-// VisionPilot — preprocess → inference → fusion → display
+// VisionPilot — preprocess → inference → fusion → display (+ optional control)
+#include "control_bridge.hpp"
+
 #include <config/vision_pilot_config.hpp>
+#include <control/control_command.hpp>
+#include <control/lateral_control.hpp>
+#include <control/longitudinal_control.hpp>
 #include <debug/debug_draw.hpp>
 #include <engine/onnx_engine.hpp>
 #include <image_preprocessing/image_preprocessor.hpp>
 #include <logging/logger.hpp>
 #include <models/inference.hpp>
+#include <planning/planning.hpp>
 #include <visualization/visualization.hpp>
 
 #include <camera_interface/frame_source.hpp>
@@ -68,6 +74,11 @@ int main(int argc, char** argv)
     const std::string label = source_label(cfg.source);
     cv::Mat frame, warped, resized;
 
+    // ── 4b. Control (optional, off by default) ───────────────────────────────
+    Planner planner;
+    LongitudinalController lon_ctrl;
+    LateralController lat_ctrl;
+
     // ── 5. Main loop ────────────────────────────────────────────────────────
     while (true) {
         auto [ok, frame] = source->get_latest_frame();
@@ -83,6 +94,24 @@ int main(int argc, char** argv)
             pipeline.latency().print();
             vd::annotate_frame(warped, vd::debug_view_from(
                 *r, label, cfg.wheel_dir, cfg.homography_path));
+
+            if (cfg.control.enabled && r->lateral.valid) {
+                // cte/epsi/kappa come straight from lateral fusion (the signed model-view
+                // world frame the MPC expects). velocity_ms is the closing rate (negative
+                // = approaching), so the lead's absolute speed is ego_v + velocity_ms.
+                // ego_v is a placeholder until vehicle-state input (Phase 5).
+                const double ego_v = cfg.control.ego_speed_mps;
+                const bool has_cipo = r->cipo.valid;
+                const double cipo_v = has_cipo ? ego_v + r->cipo.velocity_ms : ego_v;
+                const double cipo_distance = has_cipo ? r->cipo.distance_m : 9999.0;
+
+                const ControlCommand cmd = compute_control_command(
+                    planner, lon_ctrl, lat_ctrl, r->lateral.cte_m, r->lateral.yaw_rad,
+                    r->lateral.curvature, ego_v, has_cipo, cipo_v, cipo_distance,
+                    cfg.control.dt_s);
+                VP_INFO("[Control] steer=%.4f rad  speed=%.2f m/s  accel=%.2f m/s2",
+                        cmd.steering_angle_rad, cmd.speed_mps, cmd.acceleration_mps2);
+            }
         }
 
         if (show_window) visualization::render_frame(warped, "VisionPilot", {});

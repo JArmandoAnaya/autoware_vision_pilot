@@ -1,143 +1,63 @@
-// VisionPilot — preprocess → inference → fusion → display
-#include <config/vision_pilot_config.hpp>
-#include <debug/debug_draw.hpp>
-#include <engine/onnx_engine.hpp>
-#include <image_preprocessing/image_preprocessor.hpp>
-#include <logging/logger.hpp>
-#include <models/inference.hpp>
-#include <planning/planning.hpp>
-#include <visualization/visualization.hpp>
+// Smoke test for the perception → planner → control bridge: representative inputs must
+// yield a finite ControlCommand inside the controllers' physical envelopes.
+#include <control_bridge.hpp>
 
-#include <camera_interface/frame_source.hpp>
-#ifdef ENABLE_WEBRTC
-#include <visualization/visualization_to_webrtc.hpp>
-#endif
+#include <cmath>
+#include <cstdio>
+#include <string>
 
-#include <chrono>
-#include <memory>
-#include <thread>
+namespace {
 
-#include <fstream>
+int g_failures = 0;
 
-namespace ve = visionpilot::engine;
-namespace vm = visionpilot::models;
-namespace vd = visionpilot::debug;
-
-std::vector<double> readSpeeds(const std::string& filename) {
-    std::vector<double> speeds;
-    std::ifstream file(filename);
-
-    if (!file.is_open()) {
-        std::cerr << "Error: could not open file " << filename << std::endl;
-        return speeds;
-    }
-
-    std::string line;
-    while (std::getline(file, line)) {
-        // skip empty lines
-        if (line.find_first_not_of(" \t\r\n") == std::string::npos) {
-            continue;
-        }
-        try {
-            double value = std::stod(line);
-            speeds.push_back(value);
-        } catch (const std::exception& e) {
-            std::cerr << "Warning: skipping invalid line: \"" << line
-                      << "\" (" << e.what() << ")" << std::endl;
-        }
-    }
-
-    file.close();
-    return speeds;
+void check(const std::string& name, bool ok)
+{
+    std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", name.c_str());
+    if (!ok) ++g_failures;
 }
 
-int main(int argc, char** argv)
+bool in_envelope(const ControlCommand& c)
 {
-    // ── 1. Config ─────────────────────────────────────────────────────────────
-    const std::string cfg_path = resolve_vision_pilot_config_path(argc, argv);
-    if (cfg_path.empty()) {
-        VP_ERROR("No config — cp config/vision_pilot.conf.example config/vision_pilot.conf");
-        return 1;
-    }
+    const LongitudinalController::Config lc;
+    const LateralController::Config tc;
+    return std::isfinite(c.steering_angle_rad) && std::isfinite(c.speed_mps) &&
+           std::isfinite(c.acceleration_mps2) &&
+           std::fabs(c.steering_angle_rad) <= tc.max_steer_rad + 1e-9 &&
+           c.speed_mps >= lc.min_speed_mps - 1e-9 && c.speed_mps <= lc.max_speed_mps + 1e-9 &&
+           c.acceleration_mps2 >= lc.a_min - 1e-9 && c.acceleration_mps2 <= lc.a_max + 1e-9;
+}
 
-    VisionPilotConfig cfg;
-    try { cfg = load_vision_pilot_config(cfg_path); }
-    catch (const std::exception& e) { VP_ERROR("Config: %s", e.what()); return 1; }
-
-    // ── 2. Pipeline (preprocess + ONNX + inference/fusion) ────────────────────
-    ImagePreprocessor preprocessor;
-    ve::OnnxEngine engine(cfg.engine_cfg);
-    vm::InferencePipeline pipeline(engine, {
-        cfg.autodrive_model, cfg.autosteer_model, cfg.autospeed_model,
-        cfg.homography_path, cfg.fusion_debug,
-    });
-
-    vd::init_wheel_assets(cfg.wheel_dir);
-    vd::init_homography(cfg.homography_path);
-
-    // ── 3. Display output ─────────────────────────────────────────────────────
-    bool show_window = true;
-#ifdef ENABLE_WEBRTC
-    std::unique_ptr<visualization::WebRTCStreamer> webrtc;
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--webrtc") show_window = false;
-        if (std::string(argv[i]) == "--webrtc-port" && i + 1 < argc) {
-            webrtc = std::make_unique<visualization::WebRTCStreamer>();
-            if (!webrtc->init(static_cast<uint16_t>(std::stoi(argv[++i])))) return 1;
-        }
-    }
-#endif
-
-    // ── 4. Frame source (video / V4L2 / ROS2) ───────────────────────────────
-    auto source = camera_interface::open_frame_source(cfg.source);
-    if (!source || !source->is_device_open()) {
-        VP_ERROR("Cannot open frame source");
-        return 1;
-    }
-
-    const cv::Size net_size(vm::AutoDrive::NET_W, vm::AutoDrive::NET_H);
-    const std::string label = source_label(cfg.source);
-    cv::Mat frame, warped, resized;
-
+// Fresh planner + controllers per scenario (jerk/slew state must not leak between cases).
+ControlCommand eval(double cte, double epsi, double kappa, double ego_v, bool has_cipo,
+                    double cipo_v, double cipo_distance)
+{
     Planner planner;
-    // ── 5. Main loop ────────────────────────────────────────────────────────
-    int frame_number = 0;
-    std::vector<double> speeds = readSpeeds("/data/DEVELOPMENT/AUTONOMOUS/AUTOWARE/TOOLS/wod/extracted_2/frame_speed.txt");
-    while (true) {
-        auto [ok, frame] = source->get_latest_frame();
-        if (!ok || frame.empty()) {
-            if (cfg.source.mode == SourceMode::Video && !cfg.source.video_loop) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            continue;
-        }
+    LongitudinalController lon;
+    LateralController lat;
+    return compute_control_command(planner, lon, lat, cte, epsi, kappa, ego_v, has_cipo,
+                                   cipo_v, cipo_distance, 0.1);
+}
 
-        preprocessor.preprocess(frame, warped, resized, net_size);
+}  // namespace
 
-        if (const auto r = pipeline.process(warped)) {
-            pipeline.latency().print();
-            vd::annotate_frame(warped, vd::debug_view_from(
-                *r, label, cfg.wheel_dir, cfg.homography_path));
-
-            double cte = r->lateral.cte_m;
-            double epsi = r->lateral.yaw_rad;
-            double kappa = r->lateral.curvature;
-            double ego_v = speeds[frame_number++];
-            double cipo_v = r->cipo.velocity_ms;
-            double cipo_distance = r->cipo.distance_m;
-            bool has_cipo = r->cipo.cipo_raw_found;
-
-
-            // std::pair<double, std::vector<double>> plan = planner.compute_plan(cte, epsi, kappa, ego_v, has_cipo, ego_v + cipo_v, cipo_distance);
-            auto [acceleration, steering] = planner.compute_plan(cte, epsi, kappa, ego_v, has_cipo, ego_v + cipo_v, cipo_distance);
-            std::cout << "Steering: " << steering[1] * 180.0/M_PI << "  Acceleration: " << acceleration << "  EGO speed: " << ego_v << "  CIPO speed: " << ego_v + cipo_v << std::endl;
-        }
-
-        if (show_window) visualization::render_frame(warped, "VisionPilot", {});
-#ifdef ENABLE_WEBRTC
-        if (webrtc) webrtc->push_frame(warped);
-#endif
+int main()
+{
+    {  // straight free road
+        const ControlCommand cmd = eval(0.0, 0.0, 0.0, 10.0, false, 10.0, 9999.0);
+        check("straight free road: finite + in envelope", in_envelope(cmd));
+        check("straight free road: steering ~0", std::fabs(cmd.steering_angle_rad) < 0.05);
+    }
+    {  // left curve with a lateral offset, free road
+        const ControlCommand cmd = eval(0.3, 0.05, 0.02, 12.0, false, 12.0, 9999.0);
+        check("curve: finite + in envelope", in_envelope(cmd));
+    }
+    {  // approaching a slower lead vehicle (ego 15, lead 10, gap 12 m)
+        const ControlCommand cmd = eval(0.0, 0.0, 0.0, 15.0, true, 10.0, 12.0);
+        check("lead vehicle: finite + in envelope", in_envelope(cmd));
+        check("lead vehicle: decelerates", cmd.acceleration_mps2 <= 0.0);
     }
 
-    visualization::close_windows();
-    return 0;
+    std::printf("\n%s (%d failure%s)\n", g_failures ? "FAILED" : "ALL PASS", g_failures,
+                g_failures == 1 ? "" : "s");
+    return g_failures == 0 ? 0 : 1;
 }
