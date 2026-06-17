@@ -1,7 +1,7 @@
 // Phase 6 — deterministic closed-loop SIL validation harness.
 //
 // Closes the loop around the REAL control stack (Planner/MPC + the longitudinal/lateral
-// shaping controllers, composed exactly as app/control_bridge.cpp does) against an
+// shaping controllers, composed exactly as Controller::compute does) against an
 // independent kinematic plant. No weights, no sim, no ROS2 — a plain executable like
 // test_control / test_planning.
 //
@@ -48,7 +48,7 @@ bool approx(double a, double b, double tol)
   return std::fabs(a - b) <= tol;
 }
 
-// Compose the real control stack exactly like app/control_bridge.cpp:11-15.
+// Compose the real control stack exactly like modules/control/src/controller.cpp.
 ControlCommand step_control(
   Planner & planner, LongitudinalController & lon, LateralController & lat, double cte, double epsi,
   double kappa, double ego_v, bool has_cipo, double cipo_v, double cipo_distance, double dt)

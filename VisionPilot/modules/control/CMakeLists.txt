@@ -4,6 +4,7 @@ add_library(control
         src/longitudinal_control.cpp
         src/lateral_control.cpp
         src/dbw_adapter.cpp
+        src/controller.cpp
 )
 
 target_include_directories(control

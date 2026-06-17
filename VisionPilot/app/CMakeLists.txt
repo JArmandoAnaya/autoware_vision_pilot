@@ -1,10 +1,3 @@
-# Perception → planner → control glue, shared by the app and its smoke test.
-add_library(control_bridge
-    control_bridge.cpp
-)
-target_include_directories(control_bridge PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(control_bridge PUBLIC planning control)
-
 add_executable(VisionPilot
     vision_pilot.cpp
 )
@@ -30,8 +23,7 @@ target_link_libraries(VisionPilot
     models           # AutoDrive, AutoSteer, AutoSpeed
     fusion           # LongitudinalFusion, LateralFusion
     planning         # Planner
-    control          # LongitudinalController, LateralController, ControlCommand
-    control_bridge   # compute_control_command
+    control          # Controller, ControlCommand
     vp_debug         # annotate_frame, DebugView
     can_interface
     camera_interface

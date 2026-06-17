@@ -1,10 +1,7 @@
-// VisionPilot — preprocess → inference → fusion → display (+ optional control)
-#include "control_bridge.hpp"
-
+// VisionPilot - preprocess -> inference -> fusion -> display (+ optional control)
 #include <config/vision_pilot_config.hpp>
 #include <control/control_command.hpp>
-#include <control/lateral_control.hpp>
-#include <control/longitudinal_control.hpp>
+#include <control/controller.hpp>
 #include <debug/debug_draw.hpp>
 #include <engine/onnx_engine.hpp>
 #include <image_preprocessing/image_preprocessor.hpp>
@@ -80,8 +77,7 @@ int main(int argc, char** argv)
 
     // ── 4b. Control (optional, off by default) ───────────────────────────────
     Planner planner;
-    LongitudinalController lon_ctrl;
-    LateralController lat_ctrl;
+    Controller controller;
 #ifdef ENABLE_ROS2_INTERFACE
     std::unique_ptr<control_cmd_publisher::ControlCmdPublisher> control_pub;
     std::unique_ptr<vehicle_state_subscriber::VehicleStateSubscriber> vehicle_state;
@@ -127,10 +123,14 @@ int main(int argc, char** argv)
                 const double cipo_v = has_cipo ? ego_v + r->cipo.velocity_ms : ego_v;
                 const double cipo_distance = has_cipo ? r->cipo.distance_m : 9999.0;
 
-                const ControlCommand cmd = compute_control_command(
-                    planner, lon_ctrl, lat_ctrl, r->lateral.cte_m, r->lateral.yaw_rad,
-                    r->lateral.curvature, ego_v, has_cipo, cipo_v, cipo_distance,
-                    cfg.control.dt_s);
+                // Planner (safety_guardian MPC) owns the control law; the Controller is
+                // given its steering-angle + acceleration intent and shapes it for actuation.
+                auto [accel, steer_seq] = planner.compute_plan(
+                    r->lateral.cte_m, r->lateral.yaw_rad, r->lateral.curvature, ego_v,
+                    has_cipo, cipo_v, cipo_distance);
+                const double planner_steer = steer_seq.empty() ? 0.0 : steer_seq.front();
+                const ControlCommand cmd =
+                    controller.compute(planner_steer, accel, ego_v, cfg.control.dt_s);
                 VP_INFO("[Control] steer=%.4f rad  speed=%.2f m/s  accel=%.2f m/s2",
                         cmd.steering_angle_rad, cmd.speed_mps, cmd.acceleration_mps2);
 #ifdef ENABLE_ROS2_INTERFACE

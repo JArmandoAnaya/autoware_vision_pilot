@@ -4,5 +4,6 @@ add_executable(test_vision_pilot
 
 target_link_libraries(test_vision_pilot
         PRIVATE
-        control_bridge   # compute_control_command (+ planning, control)
+        planning   # Planner
+        control    # Controller, ControlCommand
 )

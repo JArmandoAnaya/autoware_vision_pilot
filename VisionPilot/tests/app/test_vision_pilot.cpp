@@ -1,6 +1,7 @@
-// Smoke test for the perception → planner → control bridge: representative inputs must
-// yield a finite ControlCommand inside the controllers' physical envelopes.
-#include <control_bridge.hpp>
+// Smoke test for the perception -> planner -> control composition: representative inputs
+// must yield a finite ControlCommand inside the controllers' physical envelopes.
+#include <control/controller.hpp>
+#include <planning/planning.hpp>
 
 #include <cmath>
 #include <cstdio>
@@ -27,15 +28,16 @@ bool in_envelope(const ControlCommand& c)
            c.acceleration_mps2 >= lc.a_min - 1e-9 && c.acceleration_mps2 <= lc.a_max + 1e-9;
 }
 
-// Fresh planner + controllers per scenario (jerk/slew state must not leak between cases).
+// Fresh planner + controller per scenario (jerk/slew state must not leak between cases).
 ControlCommand eval(double cte, double epsi, double kappa, double ego_v, bool has_cipo,
                     double cipo_v, double cipo_distance)
 {
     Planner planner;
-    LongitudinalController lon;
-    LateralController lat;
-    return compute_control_command(planner, lon, lat, cte, epsi, kappa, ego_v, has_cipo,
-                                   cipo_v, cipo_distance, 0.1);
+    Controller controller;
+    auto [accel, steer_seq] =
+        planner.compute_plan(cte, epsi, kappa, ego_v, has_cipo, cipo_v, cipo_distance);
+    const double steer = steer_seq.empty() ? 0.0 : steer_seq.front();
+    return controller.compute(steer, accel, ego_v, 0.1);
 }
 
 }  // namespace
