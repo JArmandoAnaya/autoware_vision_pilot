@@ -1,7 +1,8 @@
-// Smoke test for the perception -> planner -> control composition: representative inputs
-// must yield a finite ControlCommand inside the controllers' physical envelopes.
-#include <control/controller.hpp>
-#include <planning/planning.hpp>
+// Smoke test for the perception -> planner -> control bridge: representative inputs must
+// yield a finite ControlCommand inside the controllers' physical envelopes.
+#include <control/control_bridge.hpp>
+#include <control/lateral_control.hpp>
+#include <control/longitudinal_control.hpp>
 
 #include <cmath>
 #include <cstdio>
@@ -28,16 +29,13 @@ bool in_envelope(const ControlCommand& c)
            c.acceleration_mps2 >= lc.a_min - 1e-9 && c.acceleration_mps2 <= lc.a_max + 1e-9;
 }
 
-// Fresh planner + controller per scenario (jerk/slew state must not leak between cases).
+// Fresh bridge per scenario (planner/jerk/slew state must not leak between cases).
+// cipo_v is the lead's absolute speed; the bridge takes the closing rate (cipo_v - ego_v).
 ControlCommand eval(double cte, double epsi, double kappa, double ego_v, bool has_cipo,
                     double cipo_v, double cipo_distance)
 {
-    Planner planner;
-    Controller controller;
-    auto [accel, steer_seq] =
-        planner.compute_plan(cte, epsi, kappa, ego_v, has_cipo, cipo_v, cipo_distance);
-    const double steer = steer_seq.empty() ? 0.0 : steer_seq.front();
-    return controller.compute(steer, accel, ego_v, 0.1);
+    ControlBridge bridge;
+    return bridge.compute(cte, epsi, kappa, has_cipo, cipo_v - ego_v, cipo_distance, ego_v, 0.1);
 }
 
 }  // namespace

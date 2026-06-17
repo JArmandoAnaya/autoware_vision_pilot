@@ -1,13 +1,12 @@
 // VisionPilot - preprocess -> inference -> fusion -> display (+ optional control)
 #include <config/vision_pilot_config.hpp>
+#include <control/control_bridge.hpp>
 #include <control/control_command.hpp>
-#include <control/controller.hpp>
 #include <debug/debug_draw.hpp>
 #include <engine/onnx_engine.hpp>
 #include <image_preprocessing/image_preprocessor.hpp>
 #include <logging/logger.hpp>
 #include <models/inference.hpp>
-#include <planning/planning.hpp>
 #include <visualization/visualization.hpp>
 
 #include <camera_interface/frame_source.hpp>
@@ -76,8 +75,7 @@ int main(int argc, char** argv)
     cv::Mat frame, warped, resized;
 
     // ── 4b. Control (optional, off by default) ───────────────────────────────
-    Planner planner;
-    Controller controller;
+    ControlBridge control_bridge;
 #ifdef ENABLE_ROS2_INTERFACE
     std::unique_ptr<control_cmd_publisher::ControlCmdPublisher> control_pub;
     std::unique_ptr<vehicle_state_subscriber::VehicleStateSubscriber> vehicle_state;
@@ -106,11 +104,9 @@ int main(int argc, char** argv)
                 *r, label, cfg.wheel_dir, cfg.homography_path));
 
             if (cfg.control.enabled && r->lateral.valid) {
-                // cte/epsi/kappa come straight from lateral fusion (the signed model-view
-                // world frame the MPC expects). velocity_ms is the closing rate (negative
-                // = approaching), so the lead's absolute speed is ego_v + velocity_ms.
                 // ego_v: live ego speed from vehicle odometry when available (Phase 5),
-                // falling back to the configured constant until the first message arrives.
+                // else the configured constant. The bridge (modules/control) owns the
+                // planner + controllers; the app just hands it the fusion fields.
 #ifdef ENABLE_ROS2_INTERFACE
                 double ego_v = cfg.control.ego_speed_mps;
                 if (vehicle_state && vehicle_state->has_state()) {
@@ -119,20 +115,9 @@ int main(int argc, char** argv)
 #else
                 const double ego_v = cfg.control.ego_speed_mps;
 #endif
-                const bool has_cipo = r->cipo.valid;
-                const double cipo_v = has_cipo ? ego_v + r->cipo.velocity_ms : ego_v;
-                const double cipo_distance = has_cipo ? r->cipo.distance_m : 9999.0;
-
-                // Planner (safety_guardian MPC) owns the control law; the Controller is
-                // given its steering-angle + acceleration intent and shapes it for actuation.
-                auto [accel, steer_seq] = planner.compute_plan(
-                    r->lateral.cte_m, r->lateral.yaw_rad, r->lateral.curvature, ego_v,
-                    has_cipo, cipo_v, cipo_distance);
-                const double planner_steer = steer_seq.empty() ? 0.0 : steer_seq.front();
-                const ControlCommand cmd =
-                    controller.compute(planner_steer, accel, ego_v, cfg.control.dt_s);
-                VP_INFO("[Control] steer=%.4f rad  speed=%.2f m/s  accel=%.2f m/s2",
-                        cmd.steering_angle_rad, cmd.speed_mps, cmd.acceleration_mps2);
+                const ControlCommand cmd = control_bridge.compute(
+                    r->lateral.cte_m, r->lateral.yaw_rad, r->lateral.curvature, r->cipo.valid,
+                    r->cipo.velocity_ms, r->cipo.distance_m, ego_v, cfg.control.dt_s);
 #ifdef ENABLE_ROS2_INTERFACE
                 if (control_pub) control_pub->publish(cmd);
 #endif
