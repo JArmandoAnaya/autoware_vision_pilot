@@ -144,6 +144,10 @@ VisionPilotConfig load_vision_pilot_config(const std::string& path)
     cfg.control.ego_speed_mps =
         parse_double(optional(kv, "control.ego_speed_mps", "10.0"), "control.ego_speed_mps");
     cfg.control.dt_s = parse_double(optional(kv, "control.dt_s", "0.1"), "control.dt_s");
+    cfg.control.topic = optional(kv, "control.topic", "/control/ackermann_cmd");
+    cfg.control.frame_id = optional(kv, "control.frame_id", "base_link");
+    cfg.control.vehicle_state_topic =
+        optional(kv, "control.vehicle_state_topic", "/vehicle/odometry");
 
     // Validate control numerics: dt_s drives jerk/slew step bounds (a non-positive dt makes the
     // std::clamp limits lo>hi, which is UB); ego_speed_mps is a physical speed. Reject non-finite

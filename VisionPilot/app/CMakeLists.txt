@@ -8,6 +8,8 @@ if (ENABLE_ROS2_INTERFACE)
     target_link_libraries(VisionPilot
             PRIVATE
             camera_subscriber
+            control_cmd_publisher
+            vehicle_state_subscriber
     )
 
     target_compile_definitions(VisionPilot PRIVATE ENABLE_ROS2_INTERFACE)

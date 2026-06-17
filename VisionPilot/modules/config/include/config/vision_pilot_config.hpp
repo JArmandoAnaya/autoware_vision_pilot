@@ -22,12 +22,19 @@ struct PipelineConfig {
 };
 
 // Optional perception -> planner -> control drive loop. Off by default (pure perception +
-// display). ego_speed_mps is a placeholder constant until the ROS2 vehicle-state input lands;
-// dt_s is the control period used for steering/accel shaping.
+// display). ego_speed_mps is a placeholder until vehicle-state input (Phase 5); dt_s is
+// the control period used for steering/accel shaping.
 struct ControlConfig {
     bool        enabled       = false;
     double      ego_speed_mps = 10.0;
     double      dt_s          = 0.10;
+    // ROS2 actuation output (ENABLE_ROS2_INTERFACE only): the ControlCommand is published
+    // as ackermann_msgs/AckermannDriveStamped on `topic`, stamped with `frame_id`.
+    std::string topic         = "/control/ackermann_cmd";
+    std::string frame_id      = "base_link";
+    // ROS2 vehicle-state input (ENABLE_ROS2_INTERFACE only): nav_msgs/Odometry topic whose
+    // twist gives the live ego speed (Phase 5). ego_speed_mps is the fallback until it arrives.
+    std::string vehicle_state_topic = "/vehicle/odometry";
 };
 
 struct VisionPilotConfig {

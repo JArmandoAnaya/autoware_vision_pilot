@@ -75,3 +75,22 @@ The flag-gated perception → planner → control drive loop (`control.enabled`,
 turns the planner's intent into a `ControlCommand` `{steering_angle_rad, speed_mps,
 acceleration_mps2}`. See [`modules/control`](modules/control/README.md) — it is
 middleware-/vehicle-agnostic and owns no transport.
+
+## ROS2 interface
+
+With `-DENABLE_ROS2_INTERFACE=ON` the drive loop exchanges generic ROS2 messages on configurable
+topics:
+
+- [`modules/middleware_interfaces/ros2_interface/control_cmd_publisher`](modules/middleware_interfaces/ros2_interface/control_cmd_publisher/README.md)
+  — publishes the command as `ackermann_msgs/AckermannDriveStamped`.
+- [`.../vehicle_state_subscriber`](modules/middleware_interfaces/ros2_interface/vehicle_state_subscriber/README.md)
+  — subscribes odometry for live ego speed.
+
+A self-contained `visionpilot-ros2` image (`Docker/Dockerfile.ros2` + `Docker/build.sh` /
+`Docker/run.sh`) bakes in the ROS2 toolchain; `Docker/run.sh smoke` builds it and runs the ROS2 tests.
+
+## Tests
+
+Plain executables, no weights/sim required — build the target and run the binary (each prints
+`PASS`/`FAIL`, non-zero exit on failure): `test_control`, `test_closed_loop`, `test_planning`, and
+(with ROS2) `test_control_cmd_publisher`, `test_vehicle_state_subscriber`.

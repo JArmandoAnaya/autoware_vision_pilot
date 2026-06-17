@@ -11,6 +11,10 @@
 #include <visualization/visualization.hpp>
 
 #include <camera_interface/frame_source.hpp>
+#ifdef ENABLE_ROS2_INTERFACE
+#include <control_cmd_publisher/cmd_to_ros2.hpp>
+#include <vehicle_state_subscriber/ros2_to_state.hpp>
+#endif
 #ifdef ENABLE_WEBRTC
 #include <visualization/visualization_to_webrtc.hpp>
 #endif
@@ -76,6 +80,16 @@ int main(int argc, char** argv)
     // shapes its steering-angle + acceleration intent for actuation. The app wires them.
     Planner planner;
     Controller controller;
+#ifdef ENABLE_ROS2_INTERFACE
+    std::unique_ptr<control_cmd_publisher::ControlCmdPublisher> control_pub;
+    std::unique_ptr<vehicle_state_subscriber::VehicleStateSubscriber> vehicle_state;
+    if (cfg.control.enabled) {
+        control_pub = std::make_unique<control_cmd_publisher::ControlCmdPublisher>(
+            cfg.control.topic, cfg.control.frame_id);
+        vehicle_state = std::make_unique<vehicle_state_subscriber::VehicleStateSubscriber>(
+            cfg.control.vehicle_state_topic);
+    }
+#endif
 
     // ── 5. Main loop ────────────────────────────────────────────────────────
     while (true) {
@@ -94,9 +108,16 @@ int main(int argc, char** argv)
                 *r, label, cfg.wheel_dir));
 
             if (cfg.control.enabled && r->lateral.valid) {
-                // ego_v is the configured constant here; the live vehicle-odometry override and
-                // the actuation publish are the ROS2 layer (PR3).
+                // ego_v: live ego speed from vehicle odometry when available (Phase 5),
+                // else the configured constant.
+#ifdef ENABLE_ROS2_INTERFACE
+                double ego_v = cfg.control.ego_speed_mps;
+                if (vehicle_state && vehicle_state->has_state()) {
+                    ego_v = vehicle_state->ego_speed_mps();
+                }
+#else
                 const double ego_v = cfg.control.ego_speed_mps;
+#endif
                 // Lead absolute speed = ego + closing rate, clamped >= 0 so estimator noise near a
                 // stopped lead never feeds the planner a negative speed; far sentinel when no lead.
                 const bool has_cipo = r->cipo.valid;
@@ -114,7 +135,9 @@ int main(int argc, char** argv)
                 VP_INFO(
                     "[Control] steer=%.4f rad  speed=%.2f m/s  accel=%.2f m/s2",
                     cmd.steering_angle_rad, cmd.speed_mps, cmd.acceleration_mps2);
-                // cmd is consumed by the ROS2 actuation adapter (PR3).
+#ifdef ENABLE_ROS2_INTERFACE
+                if (control_pub) control_pub->publish(cmd);
+#endif
             }
         }
 
