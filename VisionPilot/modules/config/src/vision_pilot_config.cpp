@@ -1,5 +1,6 @@
 #include <config/vision_pilot_config.hpp>
 
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -145,11 +146,13 @@ VisionPilotConfig load_vision_pilot_config(const std::string& path)
     cfg.control.dt_s = parse_double(optional(kv, "control.dt_s", "0.1"), "control.dt_s");
 
     // Validate control numerics: dt_s drives jerk/slew step bounds (a non-positive dt makes the
-    // std::clamp limits lo>hi, which is UB); ego_speed_mps is a physical speed.
-    if (cfg.control.dt_s <= 0.0)
-        throw std::runtime_error("control.dt_s must be > 0");
-    if (cfg.control.ego_speed_mps < 0.0)
-        throw std::runtime_error("control.ego_speed_mps must be >= 0");
+    // std::clamp limits lo>hi, which is UB); ego_speed_mps is a physical speed. Reject non-finite
+    // values too -- NaN slips past every relational test (both <=0 and <0 are false for NaN) and
+    // would otherwise propagate into the controllers.
+    if (!std::isfinite(cfg.control.dt_s) || cfg.control.dt_s <= 0.0)
+        throw std::runtime_error("control.dt_s must be a finite value > 0");
+    if (!std::isfinite(cfg.control.ego_speed_mps) || cfg.control.ego_speed_mps < 0.0)
+        throw std::runtime_error("control.ego_speed_mps must be a finite value >= 0");
 
     // Validate file paths
     if (cfg.source.mode == SourceMode::Video) {

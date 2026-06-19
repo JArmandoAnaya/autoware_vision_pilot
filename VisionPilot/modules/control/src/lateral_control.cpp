@@ -13,8 +13,10 @@ double LateralController::compute(double planner_steer_rad, double dt)
     return target;
   }
 
-  // Slew-rate limit, then optional first-order low-pass.
-  const double slew_step = config_.slew_max * dt;
+  // Slew-rate limit, then optional first-order low-pass. Guard dt: a non-positive dt
+  // would make slew_step <= 0 and invert the std::clamp bounds (lo > hi) -> undefined
+  // behavior. With dt <= 0 the step is 0, so the limiter holds the previous steer.
+  const double slew_step = config_.slew_max * std::max(dt, 0.0);
   double steer = std::clamp(target, prev_steer_ - slew_step, prev_steer_ + slew_step);
   if (config_.lowpass_tau > 0.0) {
     const double alpha = dt / (config_.lowpass_tau + dt);
