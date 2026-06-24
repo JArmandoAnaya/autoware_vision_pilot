@@ -133,7 +133,6 @@ VisionPilotConfig load_vision_pilot_config(const std::string& path)
         "pipeline.initial_inference_check");
 
     cfg.fusion_debug = parse_bool(optional(kv, "fusion.debug", "false"), "fusion.debug");
-    cfg.inference.fusion_debug = cfg.fusion_debug;
 
     cfg.speed_limit = parse_double(optional(kv, "speed_limit", ""), "speed_limit");
     cfg.Lf = parse_double(optional(kv, "Lf", ""), "Lf");
