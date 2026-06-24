@@ -114,20 +114,25 @@ int main(int argc, char** argv)
                                    *r, label, cfg.wheel_dir));
 
             // Compute the plan
-            // double cte = r->lateral.cte_m;
-            // double epsi = r->lateral.yaw_rad;
-            // double kappa = r->lateral.curvature;
-            // // double ego_v = speeds[frame_number++];
-            // double cipo_v = r->cipo.velocity_ms;
-            // double cipo_distance = r->cipo.distance_m;
-            // bool has_cipo = r->cipo.cipo_raw_found;
-            //
-            // // acceleration m/s, steering rad
-            // auto [acceleration, steering, warnings] = planner.compute_plan(
-            //     cte, epsi, kappa, ego_v, has_cipo, ego_v + cipo_v,
-            //     cipo_distance);
+            const double ego_v        = vehicle_interface->read();
+            const double cte          = r->lateral.cte_m;
+            const double epsi         = r->lateral.yaw_rad;
+            const double kappa        = r->lateral.curvature;
+            const bool   has_cipo     = r->cipo.cipo_raw_found;
+            const double cipo_v       = has_cipo ? r->cipo.velocity_ms : cfg.speed_limit;
+            const double cipo_dist    = r->cipo.distance_m;
+
+            const Plan plan = planner.compute_plan(
+                cte, epsi, kappa, ego_v, has_cipo, cipo_v, cipo_dist);
+
+            VP_INFO("plan: tyre=%.4f rad  accel=%.3f m/s²",
+                    plan.steering.empty() ? 0.0 : plan.steering[0],
+                    plan.acceleration);
 
             // Send commands
+            vehicle_interface->write(
+                plan.steering.empty() ? 0.0 : plan.steering[0],
+                plan.acceleration);
         }
 
         if (show_window) visualization::render_frame(warped, "VisionPilot", {});
