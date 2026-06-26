@@ -106,6 +106,7 @@ int main(int argc, char** argv)
 
     const cv::Size net_size(vm::AutoDrive::NET_W, vm::AutoDrive::NET_H);
     cv::Mat frame, warped, resized;
+    bool h_resized_set = false;
 
     while (true)
     {
@@ -119,7 +120,14 @@ int main(int argc, char** argv)
 
         preprocessor.preprocess(frame, warped, resized, net_size);
 
-        if (const auto r = pipeline.process(warped))
+        // One-time: tell the pipeline how to project AutoSteer/AutoSpeed outputs
+        // back to world when those networks run on the plain-resized image.
+        if (!h_resized_set) {
+            pipeline.set_H_resized(preprocessor.C_mat(), preprocessor.raw_size());
+            h_resized_set = true;
+        }
+
+        if (const auto r = pipeline.process(warped, resized))
         {
             pipeline.latency().print();
 
@@ -153,15 +161,9 @@ int main(int argc, char** argv)
             if (show_window)
             {
                 if (debug_viz)
-                {
-                    auto dv = vd::debug_view_from(*r, cfg_path, cfg.wheel_dir);
-                    vd::annotate_frame(warped, dv);
-                    visualization::show_frame(warped);
-                }
+                    vd::visualize(resized, *r, cfg_path, cfg.wheel_dir, pipeline.H_world2resized());
                 else
-                {
-                    visualization::ProductionView::visualize(warped, *r, plan, ego_v);
-                }
+                    visualization::ProductionView::visualize(resized, *r, plan, ego_v, pipeline.H_resized());
             }
         }
         else if (show_window)
