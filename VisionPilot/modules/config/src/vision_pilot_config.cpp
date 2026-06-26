@@ -124,9 +124,6 @@ Config load_vision_pilot_config()
 
     cfg.source.mode          = parse_source_mode(optional(kv, "source.mode", "video"));
 
-    cfg.source.video_realtime= parse_bool(optional(kv, "source.video_realtime", "true"), "source.video_realtime");
-    cfg.source.video_loop    = parse_bool(optional(kv, "source.video_loop",     "false"), "source.video_loop");
-
     cfg.source.v4l2_device   = optional(kv, "source.v4l2_device", "/dev/video0");
     cfg.source.v4l2_fps      = parse_int(optional(kv, "source.v4l2_fps", "10"), "source.v4l2_fps");
     // cfg.pipeline.initial_inference_check = parse_bool(
@@ -151,15 +148,16 @@ Config load_vision_pilot_config()
 // #endif
 
     // Load test configuration
-    kv = parse_conf("config/vision_pilot_test.conf");
-
-    // Validate file paths
     if (cfg.source.mode == SourceMode::Video) {
+        kv = parse_conf("config/vision_pilot_test.conf");
+
         cfg.source.video_path    = expand_home(optional(kv, "source.video_path", ""));
         if (cfg.source.video_path.empty())
             throw std::runtime_error("source.mode=video requires source.video_path");
         if (!file_ok(cfg.source.video_path))
             throw std::runtime_error("source.video_path not found: " + cfg.source.video_path);
+        cfg.source.video_realtime= parse_bool(optional(kv, "source.video_realtime", "true"), "source.video_realtime");
+        cfg.source.video_loop    = parse_bool(optional(kv, "source.video_loop",     "false"), "source.video_loop");
     }
 
     return cfg;
