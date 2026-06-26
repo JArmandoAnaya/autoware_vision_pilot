@@ -149,7 +149,11 @@ int main(int argc, char** argv)
             {
                 if (debug_viz)
                 {
-                    auto dv = vd::debug_view_from(*r, cfg_path, cfg.wheel_dir);
+                    const std::string src_label =
+                        cfg.source.mode == SourceMode::Video ? cfg.source.video_path
+                      : cfg.source.mode == SourceMode::Ros2  ? cfg.source.input_camera_topic
+                      :                                        cfg.source.v4l2_device;
+                    auto dv = vd::debug_view_from(*r, src_label, cfg.wheel_dir);
                     vd::annotate_frame(warped, dv);
                     visualization::show_frame(warped);
                 }
