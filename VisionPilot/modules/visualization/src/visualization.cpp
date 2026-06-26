@@ -160,12 +160,17 @@ void init_production_assets(const std::string& icons_dir) {
 // projection step.  The ±1 m corridor stays exactly 2 m wide regardless of road
 // curvature — it correctly fans out in image-space on the inner side of bends.
 static void draw_path_corridor(cv::Mat& img, const ProductionView& view) {
-    if (!view.path_valid || !g_h_ready) return;
+    if (!view.path_valid) return;
     if (view.path_x_max_m <= view.path_x_min_m + 1.f) return;
+
+    // Use the per-view H (from H_resized) when set; fall back to global warped H.
+    const cv::Mat& H_w2px = (!view.H_world2px.empty()) ? view.H_world2px
+                                                        : g_H_world2px;
+    if (H_w2px.empty() && !g_h_ready) return;
 
     auto world_to_px = [&](float xw, float yw) -> cv::Point {
         std::vector<cv::Point2f> s = {cv::Point2f(xw, yw)}, d;
-        cv::perspectiveTransform(s, d, g_H_world2px);
+        cv::perspectiveTransform(s, d, H_w2px);
         return cv::Point(static_cast<int>(std::lround(d[0].x)),
                          static_cast<int>(std::lround(d[0].y)));
     };
@@ -403,11 +408,20 @@ static bool draw_production_frame(cv::Mat& frame, const ProductionView& view) {
 ProductionView ProductionView::from(
     const visionpilot::models::InferenceFrameResult& r,
     const Plan& plan,
-    double ego_speed_ms)
+    double ego_speed_ms,
+    const cv::Mat& H_resized)
 {
     ProductionView pv;
     pv.ego_speed_ms = ego_speed_ms;
     pv.acceleration = plan.acceleration;
+
+    // H_resized maps resized-px → world.  Invert to get world → display-px.
+    if (!H_resized.empty()) {
+        cv::Mat H64;
+        H_resized.convertTo(H64, CV_64F);
+        cv::Mat H64_inv = H64.inv();          // MatExpr → cv::Mat
+        H64_inv.convertTo(pv.H_world2px, CV_32F);
+    }
 
     pv.warnings.reserve(plan.warnings.size());
     for (const auto w : plan.warnings)
@@ -447,9 +461,10 @@ bool ProductionView::visualize(
     cv::Mat& frame,
     const visionpilot::models::InferenceFrameResult& result,
     const Plan& plan,
-    double ego_speed_ms)
+    double ego_speed_ms,
+    const cv::Mat& H_resized)
 {
-    return from(result, plan, ego_speed_ms).render(frame);
+    return from(result, plan, ego_speed_ms, H_resized).render(frame);
 }
 
 // ─── Plain frame display (warm-up / no inference yet) ────────────────────────

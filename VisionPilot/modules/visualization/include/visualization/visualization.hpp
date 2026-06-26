@@ -45,20 +45,29 @@ struct ProductionView {
 
     std::string icons_dir;
 
+    // World → display-pixel homography for path corridor projection.
+    // Populated by from() when H_resized is provided; falls back to the
+    // internal warped-BEV H when empty (legacy warped-frame mode).
+    cv::Mat H_world2px;
+
+    // H_resized (resized-px → world) used to build H_world2px = inv(H_resized).
     static ProductionView from(
         const visionpilot::models::InferenceFrameResult& result,
         const Plan& plan,
-        double ego_speed_ms);
+        double ego_speed_ms,
+        const cv::Mat& H_resized = {});
 
-    // Draw production UI onto warped BGR frame and show the window.
+    // Draw production UI onto the display frame and show the window.
+    // frame should be the resized frame when H_resized was supplied to from().
     bool render(cv::Mat& frame) const;
 
-    // One-shot: from(result, plan, ego_v) + render(frame).
+    // One-shot: from(result, plan, ego_v, H_resized) + render(frame).
     static bool visualize(
         cv::Mat& frame,
         const visionpilot::models::InferenceFrameResult& result,
         const Plan& plan,
-        double ego_speed_ms);
+        double ego_speed_ms,
+        const cv::Mat& H_resized = {});
 };
 
 void init_production_assets(const std::string& icons_dir = "");
