@@ -26,7 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
         gnupg \
-        libopencv-dev \
         coinor-libipopt-dev \
         liblapack-dev \
         libblas-dev \
@@ -35,12 +34,45 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libeigen3-dev \
         libboost-all-dev \
         python3 \
+        python3-dev \
         python3-numpy \
-        python3-opencv \
+        libjpeg-dev \
+        libpng-dev \
+        libtiff-dev \
+        libavcodec-dev \
+        libavformat-dev \
+        libswscale-dev \
+        libavutil-dev \
+        qtbase5-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # CppAD includes <coin-or/...>; guarantee that header dir exists on every Ubuntu version.
 RUN [ -e /usr/include/coin-or ] || ln -s coin /usr/include/coin-or || true
+
+# --- OpenCV (built from source) --------------------------------------------
+# Ubuntu 24.04 only ships OpenCV 4.6 via apt; build the latest 4.x from source
+# into /usr/local (C++ libs + headers + python3 cv2). Qt highgui so cv::imshow
+# works under QT_QPA_PLATFORM=offscreen, matching the previous apt build.
+ARG OPENCV_VERSION=4.12.0
+RUN git clone --depth 1 --branch "${OPENCV_VERSION}" https://github.com/opencv/opencv.git /tmp/opencv \
+    && cmake -S /tmp/opencv -B /tmp/opencv/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DOPENCV_GENERATE_PKGCONFIG=ON \
+        -DBUILD_LIST=calib3d,features2d,highgui,videoio,imgcodecs,imgproc,video,python3 \
+        -DBUILD_opencv_python3=ON \
+        -DWITH_QT=ON \
+        -DWITH_FFMPEG=ON \
+        -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_DOCS=OFF \
+        -DBUILD_opencv_apps=OFF \
+        -DOPENCV_PYTHON3_INSTALL_PATH=lib/python3.12/dist-packages \
+    && cmake --build /tmp/opencv/build -j"$(nproc)" \
+    && cmake --build /tmp/opencv/build --target install \
+    && ldconfig \
+    && rm -rf /tmp/opencv \
+    && python3 -c "import cv2; print('built cv2', cv2.__version__)"
+# Force the build to find this OpenCV (apt cv_bridge later pulls in a 4.6 as a dep).
+ENV OpenCV_DIR=/usr/local/lib/cmake/opencv4
 
 # --- ROS2 Jazzy (ENABLE_ROS2_INTERFACE=ON) ---------------------------------
 # hadolint ignore=DL3008
