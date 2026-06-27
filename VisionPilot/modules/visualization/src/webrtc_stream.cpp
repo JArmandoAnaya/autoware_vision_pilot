@@ -1,4 +1,4 @@
-#include <visualization/visualization_to_webrtc.hpp>
+#include <visualization/webrtc_stream.hpp>
 
 // GStreamer headers for WebRTC streaming
 #include <gst/app/gstappsrc.h>
@@ -23,9 +23,7 @@
 
 namespace visualization {
 
-
     namespace {
-
 
         constexpr const char kBrowserHtml[] = R"HTML(
             <!doctype html>
@@ -1002,7 +1000,7 @@ namespace visualization {
 
     };
 
-    bool WebRTCStreamer::push_frame(
+    bool WebRTCStreamer::render_frame(
         const cv::Mat & frame
     ) {
         

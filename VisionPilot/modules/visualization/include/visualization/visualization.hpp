@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <visualization/visual_interface.hpp>
 
 namespace visualization {
 
@@ -59,15 +60,21 @@ struct ProductionView {
 
     // Draw production UI onto the display frame and show the window.
     // frame should be the resized frame when H_resized was supplied to from().
-    bool render(cv::Mat& frame) const;
+    cv::Mat render(cv::Mat& frame) const;
 
     // One-shot: from(result, plan, ego_v, H_resized) + render(frame).
-    static bool visualize(
+    static cv::Mat visualize(
         cv::Mat& frame,
         const visionpilot::models::InferenceFrameResult& result,
         const Plan& plan,
         double ego_speed_ms,
         const cv::Mat& H_resized = {});
+};
+
+struct Config
+{
+    bool webrtc_on = false;
+    int webrtc_port;
 };
 
 void init_production_assets(const std::string& icons_dir = "");
@@ -78,6 +85,21 @@ bool show_frame(
     const std::string& window_name = "VisionPilot");
 
 void close_windows();
+
+class Visualization
+{
+public:
+    Visualization(Config cfg);
+    ~Visualization() = default;
+
+    std::unique_ptr<VisualInterface> visual_interface;
+    cv::Mat build_frame(cv::Mat& frame,
+        const visionpilot::models::InferenceFrameResult& result,
+        const Plan& plan,
+        double ego_speed_ms,
+        const cv::Mat& H_resized);
+    bool render_frame(const cv::Mat& display_frame);
+};
 
 }  // namespace visualization
 

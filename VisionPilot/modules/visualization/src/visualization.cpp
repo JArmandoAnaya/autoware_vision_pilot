@@ -11,6 +11,9 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <visualization/webrtc_stream.hpp>
+
+#include "visualization/local_display.hpp"
 
 namespace visualization {
 
@@ -124,6 +127,7 @@ static void gradient_colors(double acc,
     }
 }
 
+
 // ─── Public: init_production_assets ──────────────────────────────────────────
 void init_production_assets(const std::string& icons_dir) {
     if (!g_h_ready) {
@@ -145,6 +149,7 @@ void init_production_assets(const std::string& icons_dir) {
 
     if (!g_icon_rld.empty())
         cv::flip(g_icon_rld, g_icon_lld, 1);   // horizontal flip → left departure
+
 }
 
 // ─── Draw: fused-path corridor in world space (±1 m, gradient fill) ──────────
@@ -381,26 +386,21 @@ static void draw_alerts(cv::Mat& img, const ProductionView& view) {
 }
 
 // ─── Internal: draw production UI onto frame and show window ───────────────────
-static bool draw_production_frame(cv::Mat& frame, const ProductionView& view) {
-    if (frame.empty()) return false;
+static cv::Mat draw_production_frame(cv::Mat& frame, const ProductionView& view) {
+    if (frame.empty()) return cv::Mat();
 
     if (!g_h_ready || !g_ico_ready)
         init_production_assets(view.icons_dir);
 
-    cv::Mat display = frame.clone();
+    cv::Mat display_frame = frame.clone();
 
     // Render order: path → boxes → alerts → speed → CIPO text
-    draw_path_corridor(display, view);
-    draw_cipo_boxes(display, view);
-    draw_alerts(display, view);
-    draw_speed(display, view.ego_speed_ms);
+    draw_path_corridor(display_frame, view);
+    draw_cipo_boxes(display_frame, view);
+    draw_alerts(display_frame, view);
+    draw_speed(display_frame, view.ego_speed_ms);
 
-
-    cv::namedWindow("VisionPilot", cv::WINDOW_NORMAL);
-    cv::resizeWindow("VisionPilot", display.cols, display.rows);
-    cv::imshow("VisionPilot", display);
-    cv::waitKey(1);
-    return true;
+    return display_frame;
 }
 
 // ─── ProductionView ──────────────────────────────────────────────────────────
@@ -453,11 +453,11 @@ ProductionView ProductionView::from(
     return pv;
 }
 
-bool ProductionView::render(cv::Mat& frame) const {
+cv::Mat ProductionView::render(cv::Mat& frame) const {
     return draw_production_frame(frame, *this);
 }
 
-bool ProductionView::visualize(
+cv::Mat ProductionView::visualize(
     cv::Mat& frame,
     const visionpilot::models::InferenceFrameResult& result,
     const Plan& plan,
@@ -480,6 +480,33 @@ bool show_frame(const cv::Mat& frame, const std::string& window_name) {
 
 void close_windows() {
     cv::destroyAllWindows();
+}
+
+Visualization::Visualization(Config cfg)
+{
+    if (cfg.webrtc_on)
+    {
+        visual_interface = std::make_unique<WebRTCStreamer>();
+        static_cast<WebRTCStreamer*>(visual_interface.get())->init(cfg.webrtc_port);
+    } else
+    {
+        visual_interface = std::make_unique<LocalDisplay>();
+    }
+}
+
+
+cv::Mat Visualization::build_frame(cv::Mat& frame,
+        const visionpilot::models::InferenceFrameResult& result,
+        const Plan& plan,
+        double ego_speed_ms,
+        const cv::Mat& H_resized)
+{
+    return ProductionView::from(result, plan, ego_speed_ms, H_resized).render(frame);
+}
+
+bool Visualization::render_frame(const cv::Mat& display_frame)
+{
+    return visual_interface -> render_frame(display_frame);
 }
 
 }  // namespace visualization
