@@ -1,99 +1,75 @@
-# ROS2
+# VisionPilot ⇄ CARLA 0.10 (ROS 2)
 
-## CARLA simulator
-
-Run CARLA server with `--ros2` arg, to enable ROS2 integration.
-
-```
-docker run -it --rm \
-  --runtime=nvidia \                        # Use NVIDIA runtime for GPU access
-  --net=host \                              # Use the host's network stack (helps with networking/performance)
-  --env=DISPLAY=$DISPLAY \                  # Pass the host's DISPLAY environment variable (for GUI forwarding)
-  --env=NVIDIA_VISIBLE_DEVICES=all \        # Expose all GPUs to the container
-  --env=NVIDIA_DRIVER_CAPABILITIES=all \    # Enable all driver capabilities (graphics, compute, etc.)
-  --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \ # Mount X11 UNIX socket to enable GUI apps to display
-  --volume="$HOME/Downloads/carla/CARLA_0.9.16/:/home/carla/host-carla" \ 
-                                            # CHANGE AS NEEDED: Mount your local CARLA folder into the container
-  --workdir="/home/carla/host-carla" \      # Set the working directory to the mounted CARLA folder
-  carlasim/carla:0.9.16 \                   # Use the official CARLA Docker image, version 0.9.16
-  bash CarlaUE4.sh -nosound --ros2          # Run the CARLA startup script with -nosound flag
-```
-
-## Scenario runner
-
-Clone the ScenarioRunner repository.
+Drive the CARLA 0.10 Shipping ego **camera-only** with the single-binary VisionPilot
+closed loop (perception → planning → control → actuation), over CARLA's native `--ros2`.
+**VisionPilot itself is unmodified** — everything CARLA-specific lives here.
 
 ```
-git clone https://github.com/carla-simulator/scenario_runner.git
-cd scenario_runner
-python3 -m venv .venv 
-pip3 install -r requirements.txt
-export CARLA_ROOT=<CARLA ROOT directory>
-export PYTHONPATH=$CARLA_ROOT/PythonAPI/carla
+CARLA 0.10 --ros2 (windowed)
+  /carla/hero/main_cam/image  ─ sensor_msgs/Image ─►  VisionPilot (camera_subscriber)
+  ego velocity ─► ego_speed_publisher ─ /vehicle/speed (Float64) ─►  VisionPilot
+VisionPilot  (ENABLE_ROS2_INTERFACE=ON, source.mode=ros2)
+  /vehicle/steering_cmd (Float64 rad) ┐
+  /vehicle/throttle_cmd (Float64 m/s²)┴─►  carla_control_relay ─► /carla/hero/vehicle_control_cmd
+                                                              (carla_msgs/CarlaEgoVehicleControl)
 ```
 
-Run scenario for example
+## Layout
 
-```
-python3 ./scenario_runner.py --openscenario ./srunner/examples/LaneChangeSimple.xosc
-```
+| Path | Role |
+|------|------|
+| `src/visionpilot_carla_bridge/` | `carla_control_relay` (Float64 cmds → `CarlaEgoVehicleControl`) + `ego_speed_republisher`; colcon, host- or container-buildable |
+| `src/carla_msgs/` | vendored `CarlaEgoVehicleControl.msg` |
+| `ros_carla_config.py` | spawn `hero` ego + `main_cam` (CARLA PythonAPI, async mode); `SPAWN_INDEX` env |
+| `ego_speed_publisher.py` | CARLA-PythonAPI ego speed → `/vehicle/speed` (CARLA 0.10 emits no usable odometry) |
+| `config/VisionPilot_carla10.json` | ego + sensors (`hero`, `main_cam` 1280×720 **fov 60** z 1.58) |
+| `config/H_carla.yaml` | CARLA main_cam ground homography (camera → world) |
+| `config/homography_C_matrix.yaml` | preprocess warp matrix C (camera → model view), derived from `H_carla.yaml` |
+| `config/visionpilot.carla.conf`, `config/visionpilot_ros2.carla.conf` | VisionPilot run config overlay for CARLA (ros2 source + `/vehicle/*` topics) |
+| `stage_carla_config.sh` | install the two `.conf` + the C matrix into `VisionPilot/config/` for a run |
+| `gen_carla_homography.py` | regenerate `H_carla.yaml` if the camera geometry changes |
+| `build_bridge.sh` | colcon-build the bridge (`carla_msgs` + `visionpilot_carla_bridge`) |
 
-## ROS2 bridge
+> **Camera FOV is 60°, not the model's ~42° view.** The homography warp reprojects the camera
+> into the model view, sampling slightly *beyond* the model's frame at the edges; the camera must
+> be **wider** than the model view so that reprojection stays inside the captured image (a narrower
+> fov makes the warp read out-of-frame → a mirror/ghost artifact). The warp crops to the model view.
 
-Run VisionPilot ROS2 bridge
+## Build
 
-```
-cd autoware.privately-owned-vehicles/VisionPilot/Simulation/CARLA/ROS2
-git clone https://github.com/carla-simulator/ros-carla-msgs.git
-colcon build
+```bash
+# 1) VisionPilot with the ROS2 interface (in the dev container — see /Docker):
+#    cmake -B build_docker_ros2 -DENABLE_ROS2_INTERFACE=ON ... && cmake --build build_docker_ros2 --target VisionPilot
+# 2) The bridge (host ROS 2 Jazzy, or the dev container):
+./build_bridge.sh
 source install/setup.bash
-ros2 launch carla_bridge_bringup carla_bridge.launch.py
 ```
 
-## VisionPilot 0.5
+## Bring-up (fresh full restart every run)
 
-Run VisionPilot 0.5
+```bash
+# 0) stage the CARLA config into VisionPilot/config/ (does NOT modify tracked defaults in git)
+./stage_carla_config.sh
 
-```
-cd autoware.privately-owned-vehicles/VisionPilot/Middleware_Recipes/ROS2/VisionPilot_0.5
-mkdir build && cd build
-cmake ..
-make
-```
+# 1) CARLA — windowed, native ROS 2
+"$CARLA_ROOT/CarlaUnreal.sh" -nosound --ros2
 
-Update VisionPilot configuration
+# 2) spawn ego + camera (CARLA PythonAPI; SPAWN_INDEX picks the spawn point)
+SPAWN_INDEX=100 python3 ros_carla_config.py -f config/VisionPilot_carla10.json
 
-```
-autoware.privately-owned-vehicles/VisionPilot/Middleware_Recipes/ROS2/VisionPilot_0.5/visionpilot.conf
-```
+# 3) ego speed -> /vehicle/speed
+python3 ego_speed_publisher.py
 
-Update TensorRT cache directory 
+# 4) bridge — VisionPilot Float64 actuation -> CARLA control
+ros2 launch visionpilot_carla_bridge carla_bridge.launch.py
 
-```
-models.egolanes.cache_dir=/home/<USER>/.trt_cache
-```
-
-Update VisionPilot configuration for model directories
-
-```
-models.egolanes.path=/usr/share/visionpilot/models/EgoLanes_FP32.onnx
-models.autosteer.path=/usr/share/visionpilot/models/AutoSteer_FP32.onnx
+# 5) VisionPilot (CWD = VisionPilot/, ROS2 build), DDS over UDP
+FASTDDS_BUILTIN_TRANSPORTS=UDPv4 ./build_docker_ros2/VisionPilot
 ```
 
-Update the default velocity if needed
+All components share `--net=host` + `FASTDDS_BUILTIN_TRANSPORTS=UDPv4`. Between experiments do a
+full teardown (kill CARLA, the spawn helper, the speed publisher, the bridge, the VisionPilot
+process) — stale DDS topics from a previous run interfere with the next one.
 
-```
-velocity=50 # km/h
-```
-
-Run VisionPilot
-
-```
-./visionpilot ../visionpilot.conf
-```
-
-**_Note_**: Remove ctrl_shm in case not cleaned up
-
-```
-rm /dev/shm/ctrl_shm
-```
+`carla_speed_monitor.py` is an optional CARLA-PythonAPI observability tool (ground-truth ego speed +
+a collision sensor). `docs/` holds the workflow diagram.

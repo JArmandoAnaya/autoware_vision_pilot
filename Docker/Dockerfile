@@ -84,6 +84,9 @@ RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
         ros-jazzy-ros-base \
         ros-jazzy-cv-bridge \
         ros-jazzy-image-transport \
+        ros-jazzy-rosidl-default-generators \
+        python3-colcon-common-extensions \
+        python3-setuptools \
     && rm -rf /var/lib/apt/lists/*
 
 # --- ONNX Runtime SDK ------------------------------------------------------

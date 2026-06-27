@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import os
 import signal
 import carla
 
@@ -24,10 +25,14 @@ def _setup_vehicle(world, config):
         waypt = map_.get_waypoint(spawn_points[i].location)
         print ("Spawn Point {}: road {} lane {} section {}".format(i, waypt.road_id, waypt.lane_id, waypt.section_id))
     
-    if 'Town06' in map_.name:
-        spawn_pt = spawn_points[102]
-    else:
-        spawn_pt = spawn_points[5]
+    default_idx = 102 if 'Town06' in map_.name else 63  # 63 = verified clean-lane spot (Town10HD)
+    idx = int(os.environ.get("SPAWN_INDEX", default_idx))
+    if not 0 <= idx < len(spawn_points):
+        raise IndexError(
+            "SPAWN_INDEX {} out of range: map {} has {} spawn points (valid 0..{})".format(
+                idx, map_.name, len(spawn_points), len(spawn_points) - 1))
+    print("Using spawn index {} (override with SPAWN_INDEX)".format(idx))
+    spawn_pt = spawn_points[idx]
 
     return  world.spawn_actor(
         bp,
@@ -106,14 +111,18 @@ def main(args):
 
         world = client.get_world()
 
+        # Asynchronous mode: the server self-ticks in real time, so actor.get_velocity()
+        # is live for every client (the ego_speed publisher reads true speed). Synchronous
+        # mode would freeze secondary clients on a stale snapshot -> /vehicle/speed ~0 ->
+        # the planner holds max throttle -> runaway. Async is correct for a realtime drive.
         original_settings = world.get_settings()
         settings = world.get_settings()
-        settings.synchronous_mode = True
-        settings.fixed_delta_seconds = 0.02
+        settings.synchronous_mode = False
+        settings.fixed_delta_seconds = None
         world.apply_settings(settings)
 
         traffic_manager = client.get_trafficmanager()
-        traffic_manager.set_synchronous_mode(True)
+        traffic_manager.set_synchronous_mode(False)
 
         with open(args.file) as f:
             config = json.load(f)
@@ -121,7 +130,7 @@ def main(args):
         vehicle = _setup_vehicle(world, config)
         sensors = _setup_sensors(world, vehicle, config.get("sensors", []))
 
-        _ = world.tick()
+        _ = world.wait_for_tick()
 
         if (args.autopilot):
             vehicle.set_autopilot(True)
@@ -132,7 +141,7 @@ def main(args):
 
         while True:
             _follow_vehicle(world, vehicle, spectator)
-            _ = world.tick()
+            _ = world.wait_for_tick()
 
     except KeyboardInterrupt:
         print('\nCancelled by user. Bye!')
