@@ -5,11 +5,12 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <visualization/visual_interface.hpp>
 
 
 namespace visualization {
 
-    class WebRTCStreamer {
+    class WebRTCStreamer : public VisualInterface {
 
         public:
             
@@ -100,9 +101,7 @@ namespace visualization {
             *
             * @return true if frame was successfully pushed to the stream, false otherwise
             */
-            bool push_frame(
-                const cv::Mat& frame
-            );
+            bool render_frame(const cv::Mat& frame) override;
 
 
             /**

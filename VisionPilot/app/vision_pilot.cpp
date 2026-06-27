@@ -9,9 +9,6 @@
 #include <debug/debug_draw.hpp>
 
 #include <camera_interface/frame_source.hpp>
-#ifdef ENABLE_WEBRTC
-#include <visualization/visualization_to_webrtc.hpp>
-#endif
 
 #include <chrono>
 #include <memory>
@@ -39,16 +36,14 @@ int main(int argc, char** argv)
         return 1;
     }
 
+
     // ── CLI flags ─────────────────────────────────────────────────────────────
     bool show_window = true;
-    bool debug_viz   = false;
+    bool debug_viz = false;
     for (int i = 1; i < argc; ++i)
     {
         const std::string arg(argv[i]);
         if (arg == "--debug-viz") debug_viz = true;
-#ifdef ENABLE_WEBRTC
-        if (arg == "--webrtc")    show_window = false;
-#endif
     }
 
     std::shared_ptr<VehicleInterface> vehicle_interface;
@@ -79,25 +74,16 @@ int main(int argc, char** argv)
         visualization::init_production_assets();
     }
 
-#ifdef ENABLE_WEBRTC
-    std::unique_ptr<visualization::WebRTCStreamer> webrtc;
-    for (int i = 1; i < argc; ++i)
-    {
-        const std::string arg(argv[i]);
-        if (arg == "--webrtc-port" && i + 1 < argc)
-        {
-            webrtc = std::make_unique<visualization::WebRTCStreamer>();
-            if (!webrtc->init(static_cast<uint16_t>(std::stoi(argv[++i])))) return 1;
-        }
-    }
-#endif
-
+    // ── Initialize camera interface ───────────────────────────────────────────
     auto source = camera_interface::open_frame_source(cfg.source);
     if (!source || !source->is_device_open())
     {
         VP_ERROR("Cannot open frame source");
         return 1;
     }
+
+    // ── Initialize display ────────────────────────────────────────────────────
+    visualization::Visualization visualization({cfg.webrtc_on, cfg.webrtc_port});
 
     const cv::Size net_size(vm::AutoDrive::NET_W, vm::AutoDrive::NET_H);
     cv::Mat frame, warped, resized;
@@ -117,25 +103,29 @@ int main(int argc, char** argv)
         cv::Size frame_size = frame.size();
         // One-time: tell the pipeline how to project AutoSteer/AutoSpeed outputs
         // back to world when those networks run on the plain-resized image.
-        if (!h_resized_set) {
+        if (!h_resized_set)
+        {
             pipeline.set_H_resized(preprocessor.C_mat(), frame_size);
             h_resized_set = true;
         }
+
+        // ── Default frame no inference ────────────────────────────────────────────
+        cv::Mat display_frame = resized;
 
         if (const auto r = pipeline.process(warped, resized))
         {
             pipeline.latency().print();
 
-            const double ego_v  = vehicle_interface->read();
-            const double cte    = r->lateral.cte_m;
-            const double epsi   = r->lateral.yaw_rad;
-            const double kappa  = r->lateral.curvature;
+            const double ego_v = vehicle_interface->read();
+            const double cte = r->lateral.cte_m;
+            const double epsi = r->lateral.yaw_rad;
+            const double kappa = r->lateral.curvature;
 
             // has_cipo: tracker-based — true only when filter tracks a target
             // closer than D_MAX. cipo_raw_found alone must not gate the planner.
             static constexpr double D_MAX = 150.0;
-            const bool   has_cipo  = r->cipo.valid && r->cipo.distance_m < D_MAX;
-            const double cipo_v    = has_cipo ? r->cipo.velocity_ms : cfg.speed_limit;
+            const bool has_cipo = r->cipo.valid && r->cipo.distance_m < D_MAX;
+            const double cipo_v = has_cipo ? r->cipo.velocity_ms : cfg.speed_limit;
             const double cipo_dist = r->cipo.distance_m;
 
             const Plan plan = planner.compute_plan(
@@ -153,24 +143,19 @@ int main(int argc, char** argv)
                 plan.steering.empty() ? 0.0 : plan.steering[0],
                 plan.acceleration);
 
-            if (show_window)
+            if (cfg.visualization_on)
             {
                 if (debug_viz)
                     vd::visualize(resized, *r, source_label(cfg.source), cfg.wheel_dir, pipeline.H_world2resized());
                 else
-                    visualization::ProductionView::visualize(resized, *r, plan, ego_v, pipeline.H_resized());
+                    display_frame = visualization.build_frame(resized, *r, plan, ego_v, pipeline.H_resized());
             }
         }
-        else if (show_window)
+        if (cfg.visualization_on)
         {
-            visualization::show_frame(warped);
+            visualization.render_frame(display_frame);
         }
-
-#ifdef ENABLE_WEBRTC
-        if (webrtc) webrtc->push_frame(warped);
-#endif
     }
 
-    visualization::close_windows();
     return 0;
 }

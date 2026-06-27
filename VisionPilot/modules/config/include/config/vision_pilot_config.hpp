@@ -39,6 +39,10 @@ struct Config {
 
     double speed_limit;
     double Lf;
+
+    bool visualization_on = false;
+    bool webrtc_on = false;
+    int webrtc_port;
 };
 
 // Load from key=value .conf file. Expands ~ to $HOME.
