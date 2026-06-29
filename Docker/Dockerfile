@@ -34,6 +34,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libyaml-cpp-dev \
         libeigen3-dev \
         libboost-all-dev \
+        libgstreamer1.0-dev \
+        libgstreamer-plugins-base1.0-dev \
+        libgstreamer-plugins-bad1.0-dev \
+        libsoup2.4-dev \
+        libjson-glib-dev \
         python3 \
         python3-numpy \
         python3-opencv \
